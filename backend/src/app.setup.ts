@@ -10,7 +10,6 @@ import { PerformanceHeadersInterceptor } from './common/performance-headers.inte
 import type { AppConfig } from './core/config';
 
 export const BACKEND_PROXY_SECRET_HEADER = 'x-dexbotx-proxy-secret';
-export const BACKEND_CLIENT_IP_HEADER = 'x-dexbotx-client-ip';
 
 export function hasValidBackendProxySecret(received: string | undefined, expected: string | undefined): boolean {
   if (!received || !expected) return false;
@@ -26,10 +25,7 @@ export function configureApp(app: NestExpressApplication, config: AppConfig): vo
   app.use(helmet());
   if (config.isProd) {
     app.use((req: Request, res: Response, next: NextFunction) => {
-      if (
-        (req.method === 'GET' || req.method === 'HEAD')
-        && (req.path === '/dexbotx/health' || req.path === '/metrics')
-      ) {
+      if ((req.method === 'GET' || req.method === 'HEAD') && req.path === '/dexbotx/health') {
         return next();
       }
       if (!hasValidBackendProxySecret(req.get(BACKEND_PROXY_SECRET_HEADER), config.backendProxySecret)) {
@@ -51,9 +47,7 @@ export function configureApp(app: NestExpressApplication, config: AppConfig): vo
   app.useGlobalInterceptors(new PerformanceHeadersInterceptor());
   app.useBodyParser('json', { limit: '32kb' });
   app.enableCors({
-    origin: (origin, callback) => {
-      callback(null, origin && config.allowedWebOrigins.includes(origin) ? origin : false);
-    },
+    origin: config.webOrigin,
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE'],
     maxAge: 600,

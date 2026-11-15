@@ -1,4 +1,3 @@
-import { Suspense } from 'react';
 import type { Metadata } from 'next';
 import Link from 'next/link';
 import { HomeFeatureSection } from '@/components/home/feature-section';
@@ -7,7 +6,6 @@ import { SiteFooter } from '@/components/site-footer';
 import { BreadcrumbStructuredData, SiteStructuredData } from '@/components/seo/json-ld';
 import { HOME_SEO, createPageMetadata } from '@/lib/seo';
 import { SITE } from '@/lib/site';
-import { HomeAuthBanner } from '@/components/home/home-auth-banner';
 
 export const metadata: Metadata = createPageMetadata({
   path: '/',
@@ -15,6 +13,8 @@ export const metadata: Metadata = createPageMetadata({
   description: HOME_SEO.description,
   keywords: HOME_SEO.keywords,
 });
+
+export const dynamic = 'force-dynamic';
 
 const FEATURES = [
   {
@@ -64,13 +64,73 @@ const FEATURES = [
   },
 ] as const;
 
-export default function Home() {
+type HomePageProps = {
+  searchParams: Promise<{ error?: string | string[]; notice?: string | string[] }>;
+};
+
+export default async function Home({ searchParams }: HomePageProps) {
+  const params = await searchParams;
+  const error = Array.isArray(params.error) ? params.error[0] : params.error;
+  const notice = Array.isArray(params.notice) ? params.notice[0] : params.notice;
+  const authMessages: Record<string, { message: string; href: string; action: string }> = {
+    access_denied: {
+      message: 'Discord sign-in was cancelled. You can try again whenever you’re ready.',
+      href: '/api/auth/login?returnTo=/dashboard',
+      action: 'Log in with Discord',
+    },
+    login_failed: {
+      message: 'Discord sign-in could not be completed. Please try again.',
+      href: '/api/auth/login?returnTo=/dashboard',
+      action: 'Try signing in again',
+    },
+    bot_invite_cancelled: {
+      message: 'The bot invite was cancelled. DexBotX was not added to a server.',
+      href: '/api/invite',
+      action: 'Try the invite again',
+    },
+    bot_invite_failed: {
+      message: 'The bot invite could not be completed. Please try again.',
+      href: '/api/invite',
+      action: 'Try the invite again',
+    },
+  };
+  const authMessage = error ? authMessages[error] : undefined;
+  const inviteNotice = notice === 'bot_added_login_required';
+
   return (
     <>
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{
+          __html: JSON.stringify({
+            '@context': 'https://schema.org',
+            '@type': 'WebSite',
+            name: 'DexBotX Discord Bot',
+            alternateName: ['DexBotX', 'Dex Bot X'],
+            url: 'https://dexbotx.vercel.app/',
+          }),
+        }}
+      />
       <SiteStructuredData />
       <BreadcrumbStructuredData items={[{ name: 'Home', path: '/' }]} />
-      <main className="relative isolate overflow-hidden bg-[#171717] text-[#e8eaed]">
-        <Suspense fallback={null}><HomeAuthBanner /></Suspense>
+      <main className="relative isolate overflow-hidden bg-background">
+        {(authMessage || inviteNotice) && (
+          <div
+            role={authMessage ? 'alert' : 'status'}
+            className="mx-auto mt-6 flex max-w-4xl flex-wrap items-center justify-between gap-3 rounded-xl border border-white/15 bg-white/[0.06] px-4 py-3 text-sm text-white/85"
+          >
+            <p>
+              {authMessage?.message ??
+                'DexBotX was authorized for your server. Log in with Discord to configure it in the dashboard.'}
+            </p>
+            <a
+              href={authMessage?.href ?? '/api/auth/login?returnTo=/dashboard'}
+              className="shrink-0 font-medium text-white underline underline-offset-4 hover:text-white/75"
+            >
+              {authMessage?.action ?? 'Log in with Discord'}
+            </a>
+          </div>
+        )}
         <div className="relative">
           <HomeHero creator={SITE.creator} />
 
@@ -118,7 +178,7 @@ export default function Home() {
                 </thead>
                 <tbody className="divide-y divide-white/10 text-white/65">
                   <tr>
-                    <th scope="row" className="p-4 font-medium text-white">Feature access</th>
+                    <th scope="row" className="p-4 font-medium text-foreground">Feature access</th>
                     <td className="p-4">One bot for multiple server automation needs</td>
                     <td className="p-4">Each task may require its own workflow or service</td>
                   </tr>

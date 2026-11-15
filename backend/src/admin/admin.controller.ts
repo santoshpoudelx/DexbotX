@@ -74,16 +74,6 @@ export class AdminController {
     return this.operations.leaveGuild(req.session!.userId, id, body?.confirm ?? '');
   }
 
-  @Post('guilds/:id/purge')
-  purgeGuildData(@Param('id') id: string, @Body() body: { confirm?: string }, @Req() req: AuthedRequest) {
-    return this.operations.purgeGuildData(req.session!.userId, id, body?.confirm ?? '');
-  }
-
-  @Post('audit/prune')
-  pruneOldAuditLogs(@Body() body: { confirm?: boolean }, @Req() req: AuthedRequest) {
-    return this.operations.pruneOldAuditLogs(req.session!.userId, body?.confirm === true);
-  }
-
   @Get('failures')
   failures() {
     return this.operations.failures();

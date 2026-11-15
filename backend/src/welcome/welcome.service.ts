@@ -116,7 +116,7 @@ export class WelcomeService {
     });
     await this.cache.invalidate(guild.id);
 
-    await this.removeReplacedBackground(guild.id, before, kind, config);
+    await this.removeReplacedBackground(before, kind, config);
     return { config, imageKey: config.image.enabled ? createCardKey(config.image, session.avatarHash, guild.bannerHash) : null };
   }
 
@@ -144,12 +144,11 @@ export class WelcomeService {
     });
     await this.cache.invalidate(guild.id);
 
-    await this.removeReplacedBackground(guild.id, before, kind, config);
+    await this.removeReplacedBackground(before, kind, config);
     return { config, imageKey: config.image.enabled ? createCardKey(config.image, session.avatarHash, guild.bannerHash) : null };
   }
 
   private async removeReplacedBackground(
-    guildId: string,
     before: Awaited<ReturnType<SettingsCache['get']>>,
     kind: MessageKind,
     config: MessageConfig,
@@ -159,10 +158,6 @@ export class WelcomeService {
     if (oldPath && oldPath !== config.image.backgroundPath && oldPath !== before[other].image.backgroundPath) {
       await this.storage.remove(oldPath);
     }
-    const keepPaths = new Set(
-      [config.image.backgroundPath, before[other].image.backgroundPath].filter((path): path is string => Boolean(path)),
-    );
-    await this.storage.pruneGuildBackgrounds(guildId, keepPaths);
   }
 
   imageKey(guild: GuildRow, session: SessionData, config: MessageConfig): string | null {

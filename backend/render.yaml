@@ -15,6 +15,8 @@ envVarGroups:
         value: "true"
       - key: DATABASE_POOL_MAX
         value: "10"
+      - key: BOT_PERMISSIONS
+        value: "268487688"
       - key: DISCORD_SUPPORT_URL
         value: ""
       - key: ADMIN_USER_IDS
@@ -93,11 +95,6 @@ services:
           type: web
           name: dexbotx-zq8g
           envVarKey: SESSION_ENCRYPTION_KEY
-      - key: BACKEND_PROXY_SECRET
-        fromService:
-          type: web
-          name: dexbotx-zq8g
-          envVarKey: BACKEND_PROXY_SECRET
 
   - type: worker
     name: dexbotx-worker
@@ -138,8 +135,3 @@ services:
           type: web
           name: dexbotx-zq8g
           envVarKey: SESSION_ENCRYPTION_KEY
-      - key: BACKEND_PROXY_SECRET
-        fromService:
-          type: web
-          name: dexbotx-zq8g
-          envVarKey: BACKEND_PROXY_SECRET

@@ -48,20 +48,30 @@ export class AdminUsersContentService {
 
   async revokeUser(adminId: string, userId: string) {
     if (!/^\d{17,20}$/.test(userId)) throw new NotFoundException();
-    const revoked = await this.sessions.destroyAllForUser(userId);
+    const keys = await this.scanSessionKeys();
+    const removed: string[] = [];
+    for (let start = 0; start < keys.length; start += 200) {
+      const batch = keys.slice(start, start + 200);
+      const values = await this.redis.client.mget(...batch);
+      values.forEach((value, index) => {
+        if (!value) return;
+        try {
+          const session = JSON.parse(value) as { userId?: string };
+          if (session.userId === userId) removed.push(batch[index]);
+        } catch {
+          return;
+        }
+      });
+    }
+    if (removed.length) await this.redis.client.del(...removed);
+    const indexedRemoved = await this.sessions.destroyAllForUser(userId);
     await this.redis.client.del('admin:users:active-sessions');
+    const revoked = removed.length + indexedRemoved;
     await this.audit.log(adminId, 'user.revoke_sessions', userId, { revoked });
     return { revoked };
   }
 
   async content() {
-    const cached = await this.redis.client.get('admin:content');
-    if (cached) {
-      return JSON.parse(cached) as {
-        presetUsage: Array<{ id: string; name: string; uses: number }>;
-        backgrounds: Array<{ path: string; guildId: string; size: number; uploadedAt: string | null }>;
-      };
-    }
     const settings = await this.database.db.select().from(guildSettings);
     const presetUsage = PRESETS.map((preset) => ({
       id: preset.id,
@@ -71,16 +81,13 @@ export class AdminUsersContentService {
         return total + (matchesPreset(config, preset.config) ? 1 : 0);
       }, 0),
     }));
-    const content = { presetUsage, backgrounds: await this.storage.listBackgrounds() };
-    await this.redis.client.set('admin:content', JSON.stringify(content), 'EX', 30);
-    return content;
+    return { presetUsage, backgrounds: await this.storage.listBackgrounds() };
   }
 
   async deleteBackground(adminId: string, path: string, confirmed: boolean) {
     if (!confirmed) throw new BadRequestException('Confirmation required');
     if (!BACKGROUND_PATH_RE.test(path)) throw new BadRequestException('Invalid background path');
     await this.storage.deleteBackground(path);
-    await this.redis.client.del('admin:content');
 
     const guildId = path.split('/')[0];
     const rows = await this.database.db.select().from(guildSettings).where(eq(guildSettings.guildId, guildId));

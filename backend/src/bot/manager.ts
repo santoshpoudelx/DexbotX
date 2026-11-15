@@ -8,7 +8,6 @@ import { loadConfig } from '../core/config';
  * Entry point for the bot. Spawns one process per configured Discord shard.
  */
 async function main() {
-  process.env.DEXBOTX_PROCESS_ROLE = 'bot';
   const config = loadConfig();
   const log = pino({ level: config.logLevel, name: 'shard-manager' });
 

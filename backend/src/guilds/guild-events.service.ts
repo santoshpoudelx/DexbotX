@@ -49,10 +49,7 @@ export class GuildEventsService implements OnModuleInit {
           && data !== null
           && 'guildId' in data
           && typeof data.guildId === 'string'
-          && (
-            allowedGuildIds.has(data.guildId)
-            || (event.type === 'guilds_changed' && data.guildId === '*' && allowedGuildIds.size > 0)
-          )
+          && allowedGuildIds.has(data.guildId)
         );
       }),
     );

@@ -1,6 +1,5 @@
 import { Inject, Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
 import { APP_CONFIG, AppConfig } from '../core/config';
-import { Semaphore } from '../shared/semaphore';
 
 export const BACKGROUND_PATH_RE = /^\d{17,20}\/[0-9a-f]{64}\.jpg$/;
 const MAX_BYTES = 4 * 1024 * 1024;
@@ -98,37 +97,23 @@ export class AssetStorage {
 
   async listBackgrounds(): Promise<Array<{ path: string; guildId: string; size: number; uploadedAt: string | null }>> {
     if (!this.enabled) return [];
+    const backgrounds: Array<{ path: string; guildId: string; size: number; uploadedAt: string | null }> = [];
     const roots = await this.listObjects('');
-    const folders = roots.filter((entry) => entry.id === null && /^\d{17,20}$/.test(entry.name));
-    const semaphore = new Semaphore(8, folders.length);
-    const grouped = await Promise.all(folders.map((folder) => semaphore.run(async () => {
+    for (const folder of roots.filter((entry) => entry.id === null && /^\d{17,20}$/.test(entry.name))) {
       const guildId = folder.name;
       const objects = await this.listObjects(`${guildId}/`);
-      return objects.flatMap((object) => {
+      for (const object of objects) {
         const path = `${guildId}/${object.name}`;
-        if (!BACKGROUND_PATH_RE.test(path)) return [];
-        return [{
+        if (!BACKGROUND_PATH_RE.test(path)) continue;
+        backgrounds.push({
           path,
           guildId,
           size: Number(object.metadata?.size ?? object.metadata?.contentLength ?? 0),
           uploadedAt: object.created_at ?? object.updated_at ?? null,
-        }];
-      });
-    })));
-    return grouped.flat();
-  }
-
-  async pruneGuildBackgrounds(guildId: string, keepPaths: ReadonlySet<string>): Promise<void> {
-    if (!this.enabled || !/^\d{17,20}$/.test(guildId)) return;
-    try {
-      const objects = await this.listObjects(`${guildId}/`);
-      const paths = objects
-        .map((object) => `${guildId}/${object.name}`)
-        .filter((path) => BACKGROUND_PATH_RE.test(path) && !keepPaths.has(path));
-      await Promise.all(paths.map((path) => this.remove(path)));
-    } catch (error) {
-      this.logger.warn(`Could not prune stored backgrounds for ${guildId}: ${error instanceof Error ? error.message : String(error)}`);
+        });
+      }
     }
+    return backgrounds;
   }
 
   async deleteBackground(path: string): Promise<void> {

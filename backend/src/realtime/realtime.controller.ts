@@ -17,10 +17,7 @@ export class RealtimeController {
   @RateLimit('ws-ticket', 10)
   async createTicket(@Req() req: AuthedRequest): Promise<{ ticket: string; url: string }> {
     const ticket = randomToken(32);
-    const ticketData = req.sid
-      ? JSON.stringify({ userId: req.session!.userId, sid: req.sid })
-      : req.session!.userId;
-    await this.redis.client.set(`wsticket:${ticket}`, ticketData, 'EX', 30);
+    await this.redis.client.set(`wsticket:${ticket}`, req.session!.userId, 'EX', 30);
     const url = new URL(this.config.wsPublicUrl);
     url.searchParams.set('ticket', ticket);
     return { ticket, url: url.toString() };

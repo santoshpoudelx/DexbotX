@@ -5,8 +5,6 @@ import type { DiscordTokenResponse, DiscordUser } from '../discord/discord-rest.
 import { RedisService } from '../redis/redis.service';
 import { decrypt, encrypt, randomToken, sha256Hex } from '../shared/crypto';
 
-export const SESSION_REVOKED_CHANNEL = 'dexbotx:sessions:revoked';
-
 /**
  * Server-side sessions in Redis. The browser only holds an opaque random id in an httpOnly cookie;
  * the Discord access token never leaves the server and is encrypted at rest. Redis keys use a hash of
@@ -43,7 +41,7 @@ export class SessionService {
     const sidHash = sha256Hex(sid);
     await this.redis.client.set(`sess:${sidHash}`, JSON.stringify(data), 'EX', ttlSeconds);
     await this.redis.client.sadd(this.userIndexKey(user.id), sidHash);
-    await this.redis.client.expire(this.userIndexKey(user.id), this.config.sessionTtlSeconds);
+    await this.redis.client.expire(this.userIndexKey(user.id), ttlSeconds);
     return { sid, ttlSeconds };
   }
 
@@ -61,10 +59,7 @@ export class SessionService {
   async destroy(sid: string): Promise<void> {
     const session = await this.get(sid);
     await this.redis.client.del(this.key(sid));
-    if (session) {
-      await this.redis.client.srem(this.userIndexKey(session.userId), sha256Hex(sid));
-      await this.redis.client.publish(SESSION_REVOKED_CHANNEL, session.userId);
-    }
+    if (session) await this.redis.client.srem(this.userIndexKey(session.userId), sha256Hex(sid));
   }
 
   async destroyAllForUser(userId: string): Promise<number> {
@@ -77,40 +72,27 @@ export class SessionService {
       "redis.call('DEL', KEYS[1])",
       'return deleted',
     ].join('\n');
-    const deleted = Number(await this.redis.client.eval(script, 1, this.userIndexKey(userId)));
-    await this.redis.client.publish(SESSION_REVOKED_CHANNEL, userId);
-    return deleted;
+    return Number(await this.redis.client.eval(script, 1, this.userIndexKey(userId)));
   }
 
   async findActiveForUser(userId: string): Promise<SessionData | null> {
-    const indexKey = this.userIndexKey(userId);
-    const hashes = await this.redis.client.smembers(indexKey);
-    if (hashes.length === 0) return null;
-
-    const values = await this.redis.client.mget(...hashes.map((hash) => `sess:${hash}`));
-    const staleHashes: string[] = [];
-    let activeSession: SessionData | null = null;
-    const now = Date.now();
-
-    values.forEach((raw, index) => {
-      if (!raw) {
-        staleHashes.push(hashes[index]);
-        return;
-      }
-      try {
-        const session = JSON.parse(raw) as SessionData;
-        if (session.userId !== userId || !Number.isFinite(session.expiresAt) || session.expiresAt <= now) {
-          staleHashes.push(hashes[index]);
-        } else if (!activeSession) {
-          activeSession = session;
+    let cursor = '0';
+    do {
+      const [next, keys] = await this.redis.client.scan(cursor, 'MATCH', 'sess:*', 'COUNT', 200);
+      cursor = next;
+      if (keys.length === 0) continue;
+      const values = await this.redis.client.mget(...keys);
+      for (const raw of values) {
+        if (!raw) continue;
+        try {
+          const session = JSON.parse(raw) as SessionData;
+          if (session.userId === userId && session.expiresAt > Date.now()) return session;
+        } catch {
+          continue;
         }
-      } catch {
-        staleHashes.push(hashes[index]);
       }
-    });
-
-    if (staleHashes.length) await this.redis.client.srem(indexKey, ...staleHashes);
-    return activeSession;
+    } while (cursor !== '0');
+    return null;
   }
 
   accessToken(session: SessionData): string {

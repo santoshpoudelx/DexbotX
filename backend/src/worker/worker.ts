@@ -25,15 +25,11 @@ async function bootstrap() {
   const publishHeartbeat = async () => {
     try {
       const counts = await queue.getJobCounts('active', 'waiting');
-      const payload = {
+      await stats.heartbeat('worker', {
         active: counts.active ?? 0,
         waiting: counts.waiting ?? 0,
         at: new Date().toISOString(),
-      };
-      await Promise.all([
-        stats.heartbeat('worker', payload, 60),
-        stats.heartbeat(`worker:${process.pid}`, payload, 60),
-      ]);
+      }, 60);
     } catch (error) {
       logger.error(`Worker heartbeat failed: ${(error as Error).message}`);
     }

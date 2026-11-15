@@ -24,11 +24,6 @@ class ProtectedProbeController {
   protected() {
     return { status: 'ok' };
   }
-
-  @Get('metrics')
-  metrics() {
-    return { status: 'scrape-ready' };
-  }
 }
 
 @Module({ controllers: [ProbeController, ProtectedProbeController] })
@@ -54,7 +49,6 @@ describe('configureApp production API guard', () => {
     const config = loadConfig({
       NODE_ENV: 'production',
       WEB_URL: 'https://dexbotx.vercel.app',
-      ALLOWED_WEB_ORIGINS: 'https://dashboard.example.com',
       WS_PUBLIC_URL: 'wss://api.dexbotx.test/ws',
       DATABASE_URL: 'postgres://user:password@localhost:5432/dexbotx',
       REDIS_URL: 'redis://localhost:6379',
@@ -79,11 +73,6 @@ describe('configureApp production API guard', () => {
     await request(app.getHttpServer()).head('/dexbotx/health').expect(200);
   });
 
-  it('lets direct GET /metrics reach controller-level authentication', async () => {
-    await request(app.getHttpServer()).get('/metrics').expect(200, { status: 'scrape-ready' });
-    await request(app.getHttpServer()).post('/metrics').expect(403);
-  });
-
   it('rejects API requests without the proxy secret', async () => {
     await request(app.getHttpServer())
       .get('/protected')
@@ -104,7 +93,7 @@ describe('configureApp production API guard', () => {
       .expect(200, { status: 'ok' });
   });
 
-  it('allows CORS only for configured production dashboard origins', async () => {
+  it('allows CORS only for the configured production origin', async () => {
     const allowed = await request(app.getHttpServer())
       .get('/dexbotx/health')
       .set('Origin', 'https://dexbotx.vercel.app')
@@ -112,18 +101,12 @@ describe('configureApp production API guard', () => {
       .expect(200);
     expect(allowed.headers['access-control-allow-origin']).toBe('https://dexbotx.vercel.app');
 
-    const additional = await request(app.getHttpServer())
-      .get('/dexbotx/health')
-      .set('Origin', 'https://dashboard.example.com')
-      .set('x-dexbotx-proxy-secret', secret)
-      .expect(200);
-    expect(additional.headers['access-control-allow-origin']).toBe('https://dashboard.example.com');
-
     const disallowed = await request(app.getHttpServer())
       .get('/dexbotx/health')
       .set('Origin', 'https://attacker.example')
       .set('x-dexbotx-proxy-secret', secret)
       .expect(200);
-    expect(disallowed.headers['access-control-allow-origin']).toBeUndefined();
+    expect(disallowed.headers['access-control-allow-origin']).toBe('https://dexbotx.vercel.app');
+    expect(disallowed.headers['access-control-allow-origin']).not.toBe('https://attacker.example');
   });
 });

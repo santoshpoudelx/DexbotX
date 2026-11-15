@@ -3,7 +3,6 @@ import { filter, firstValueFrom, take } from 'rxjs';
 import { RedisService } from '../redis/redis.service';
 import {
   GUILD_CHANNELS_CHANGED_CHANNEL,
-  GUILD_MEMBERSHIP_EVENTS_CHANNEL,
   GUILD_SYNCED_CHANNEL,
 } from './guild-events';
 import { GuildEventsService } from './guild-events.service';
@@ -47,27 +46,5 @@ describe('GuildEventsService', () => {
     subscription.unsubscribe();
 
     expect(received).toEqual([JSON.stringify({ type: 'channels_changed', data: { guildId: 'allowed-guild' } })]);
-  });
-
-  it('relays reconciliation broadcasts only to subscribers with manageable guilds', async () => {
-    const handlers = new Map<string, (channel: string, message: string) => void>();
-    const redis = {
-      subscribe: jest.fn(async (channel: string, handler: (channel: string, message: string) => void) => {
-        handlers.set(channel, handler);
-      }),
-    } as unknown as RedisService;
-    const service = new GuildEventsService(redis);
-    await service.onModuleInit();
-
-    const received: string[] = [];
-    const authorized = service.stream(new Set(['allowed-guild'])).subscribe((event) => received.push(JSON.stringify(event)));
-    const empty = service.stream(new Set()).subscribe((event) => received.push(JSON.stringify(event)));
-    handlers.get(GUILD_MEMBERSHIP_EVENTS_CHANNEL)?.(GUILD_MEMBERSHIP_EVENTS_CHANNEL, '*');
-    handlers.get(GUILD_MEMBERSHIP_EVENTS_CHANNEL)?.(GUILD_MEMBERSHIP_EVENTS_CHANNEL, 'other-guild');
-    handlers.get(GUILD_CHANNELS_CHANGED_CHANNEL)?.(GUILD_CHANNELS_CHANGED_CHANNEL, 'other-guild');
-    authorized.unsubscribe();
-    empty.unsubscribe();
-
-    expect(received).toEqual([JSON.stringify({ type: 'guilds_changed', data: { guildId: '*' } })]);
   });
 });

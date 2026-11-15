@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { NextRequest } from 'next/server';
-import { DELETE, GET, HEAD, MAX_PROXY_BODY_BYTES, OPTIONS, PATCH, POST, PUT } from './route';
+import { DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT } from './route';
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -55,71 +55,6 @@ describe('API route proxy security header', () => {
     await GET(request({ 'x-dexbotx-proxy-secret': 'client-supplied' }), context);
 
     expect(forwardedHeaders?.has('x-dexbotx-proxy-secret')).toBe(false);
-  });
-
-  it('forwards only the edge-provided client IP headers and removes a forged custom header', async () => {
-    let forwardedHeaders: Headers | undefined;
-    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
-      forwardedHeaders = new Headers(init?.headers);
-      return new Response('ok');
-    });
-    vi.stubEnv('NODE_ENV', 'development');
-    vi.stubEnv('BACKEND_URL', 'https://backend.example.com');
-    vi.stubGlobal('fetch', fetchMock);
-
-    await GET(request({
-      'x-forwarded-for': '203.0.113.12, 10.0.0.1',
-      'x-dexbotx-client-ip': '198.51.100.55',
-    }), context);
-    expect(forwardedHeaders?.get('x-dexbotx-client-ip')).toBe('203.0.113.12');
-
-    await GET(request({ 'x-dexbotx-client-ip': '198.51.100.55' }), context);
-    expect(new Headers(fetchMock.mock.calls[1][1]?.headers).has('x-dexbotx-client-ip')).toBe(false);
-  });
-
-  it('prefers x-real-ip when forwarding the client address', async () => {
-    let forwardedHeaders: Headers | undefined;
-    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
-      forwardedHeaders = new Headers(init?.headers);
-      return new Response('ok');
-    });
-    vi.stubEnv('NODE_ENV', 'development');
-    vi.stubEnv('BACKEND_URL', 'https://backend.example.com');
-    vi.stubGlobal('fetch', fetchMock);
-
-    await GET(request({ 'x-real-ip': '203.0.113.18', 'x-forwarded-for': '203.0.113.12' }), context);
-
-    expect(forwardedHeaders?.get('x-dexbotx-client-ip')).toBe('203.0.113.18');
-  });
-
-  it('rejects request bodies over the proxy limit without calling fetch', async () => {
-    const fetchMock = vi.fn();
-    vi.stubEnv('NODE_ENV', 'development');
-    vi.stubEnv('BACKEND_URL', 'https://backend.example.com');
-    vi.stubGlobal('fetch', fetchMock);
-
-    const response = await POST(new NextRequest('https://dexbotx.vercel.app/api/upload', {
-      method: 'POST',
-      headers: { 'content-length': String(MAX_PROXY_BODY_BYTES + 1) },
-    }), { params: Promise.resolve({ path: ['upload'] }) });
-
-    expect(response.status).toBe(413);
-    expect(fetchMock).not.toHaveBeenCalled();
-  });
-
-  it('checks the actual body size when content-length is absent or inaccurate', async () => {
-    const fetchMock = vi.fn();
-    vi.stubEnv('NODE_ENV', 'development');
-    vi.stubEnv('BACKEND_URL', 'https://backend.example.com');
-    vi.stubGlobal('fetch', fetchMock);
-
-    const response = await POST(new NextRequest('https://dexbotx.vercel.app/api/upload', {
-      method: 'POST',
-      body: new Uint8Array(MAX_PROXY_BODY_BYTES + 1),
-    }), { params: Promise.resolve({ path: ['upload'] }) });
-
-    expect(response.status).toBe(413);
-    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 

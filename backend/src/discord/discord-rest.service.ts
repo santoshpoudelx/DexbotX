@@ -3,7 +3,6 @@ import { APP_CONFIG, AppConfig } from '../core/config';
 import type { BuiltMessage } from '../render/message-builder.service';
 import { StatsService } from '../admin/stats.service';
 import { RedisService } from '../redis/redis.service';
-import { sha256Hex } from '../shared/crypto';
 
 const API = new URL('https://discord.com/api/v10/');
 const USER_AGENT = 'DiscordBot (https://dexbotx.app, 1.0.0)';
@@ -76,7 +75,6 @@ export interface DiscordRole {
   name: string;
   color: number;
   position: number;
-  permissions?: string;
   hoist?: boolean;
 }
 
@@ -131,30 +129,21 @@ export class DiscordRestService {
         : undefined;
       if (res.status === 429 && retryAfter !== undefined) {
         const route = path.split('?')[0].replace(/\/\d{17,20}(?=\/|$)/g, '/:id');
-        const scope = res.headers.get('x-ratelimit-scope');
-        const global = (isRecord(body) && body.global === true) || scope === 'global';
+        const global = isRecord(body) && body.global === true;
         await this.stats.pushEvent('d429', {
           route,
-          scope,
+          scope: res.headers.get('x-ratelimit-scope'),
           retryAfter,
           global,
           at: new Date().toISOString(),
         });
         try {
-          const ttlSeconds = Math.max(1, Math.ceil(retryAfter));
-          const expiresAt = String(Date.now() + ttlSeconds * 1000);
-          if (global) {
-            await this.redis.client.set('discord:blocked_until', expiresAt, 'EX', ttlSeconds);
-          } else {
-            const authorization = new Headers(init.headers).get('authorization') ?? '';
-            const userTokenKey = /^Bearer\s/i.test(authorization)
-              ? `discord:blocked:user:${sha256Hex(authorization)}`
-              : undefined;
-            const channelRoute = /^\/guilds\/(\d{17,20})\/channels(?:\?|$)/.exec(path);
-            const scopedKey = userTokenKey
-              ?? (channelRoute ? `discord:blocked:channels:${channelRoute[1]}` : undefined);
-            if (scopedKey) await this.redis.client.set(scopedKey, expiresAt, 'EX', ttlSeconds);
-          }
+          await this.redis.client.set(
+            'discord:blocked_until',
+            String(Date.now() + Math.ceil(retryAfter * 1000)),
+            'EX',
+            Math.max(1, Math.ceil(retryAfter)),
+          );
         } catch (error) {
           this.logger.warn(`Discord cooldown write failed: ${error instanceof Error ? error.message : String(error)}`);
         }
@@ -227,18 +216,13 @@ export class DiscordRestService {
     const cached = await this.redis.client.get(key);
     if (cached) return JSON.parse(cached) as DiscordChannel[];
 
-    const [blockedUntil, routeBlockedUntil] = await Promise.all([
-      this.redis.client.get('discord:blocked_until'),
-      this.redis.client.get(`discord:blocked:channels:${guildId}`),
-    ]);
-    const now = Date.now();
-    const blocked = Math.max(Number(blockedUntil ?? 0), Number(routeBlockedUntil ?? 0));
-    if (blocked > now) {
+    const blockedUntil = Number(await this.redis.client.get('discord:blocked_until'));
+    if (blockedUntil > Date.now()) {
       throw new DiscordApiError(
         429,
         undefined,
         'Discord is temporarily rate limited and no cached channels are available.',
-        Math.ceil((blocked - now) / 1000),
+        Math.ceil((blockedUntil - Date.now()) / 1000),
       );
     }
 
@@ -253,53 +237,14 @@ export class DiscordRestService {
 
   async canBotPost(channelId: string): Promise<boolean> {
     const channel = await this.request<DiscordChannel>(`/channels/${channelId}`, { headers: this.bot() });
-    if (!channel.guild_id) return false;
     const overwrites = channel.permission_overwrites ?? [];
+    const denies = overwrites.filter((overwrite) =>
+      overwrite.id === this.config.discordClientId || (overwrite.type === 0 && overwrite.id === channel.guild_id),
+    );
+    const denied = denies.reduce((bits, overwrite) => bits | BigInt(overwrite.deny), 0n);
+    const allowed = denies.reduce((bits, overwrite) => bits | BigInt(overwrite.allow), 0n);
     const required = (1n << 10n) | (1n << 11n);
-    const applyOverwrite = (permissions: bigint, overwrite: { allow: string; deny: string }) =>
-      (permissions & ~BigInt(overwrite.deny)) | BigInt(overwrite.allow);
-    const overwriteOnlyCheck = (): boolean => {
-      let permissions = required;
-      const everyoneOverwrite = overwrites.find((overwrite) => overwrite.type === 0 && overwrite.id === channel.guild_id);
-      if (everyoneOverwrite) permissions = applyOverwrite(permissions, everyoneOverwrite);
-      const memberOverwrite = overwrites.find((overwrite) => overwrite.type === 1 && overwrite.id === this.config.discordClientId);
-      if (memberOverwrite) permissions = applyOverwrite(permissions, memberOverwrite);
-      return (permissions & required) === required;
-    };
-
-    let roles: DiscordRole[];
-    let member: { roles: string[] };
-    try {
-      [roles, member] = await Promise.all([
-        this.getGuildRoles(channel.guild_id),
-        this.getGuildMember(channel.guild_id, this.config.discordClientId),
-      ]);
-    } catch (error) {
-      this.logger.warn(`Could not load bot roles for channel ${channelId}; using overwrite-only permission check: ${error instanceof Error ? error.message : String(error)}`);
-      return overwriteOnlyCheck();
-    }
-
-    if (roles.some((role) => typeof role.permissions !== 'string')) return overwriteOnlyCheck();
-    const memberRoleIds = new Set(member.roles);
-    let permissions = 0n;
-    for (const role of roles) {
-      if (role.id === channel.guild_id || memberRoleIds.has(role.id)) {
-        permissions |= BigInt(role.permissions ?? '0');
-      }
-    }
-    if ((permissions & (1n << 3n)) !== 0n) return true;
-
-    const everyoneOverwrite = overwrites.find((overwrite) => overwrite.type === 0 && overwrite.id === channel.guild_id);
-    if (everyoneOverwrite) permissions = applyOverwrite(permissions, everyoneOverwrite);
-
-    const roleOverwrites = overwrites.filter((overwrite) => overwrite.type === 0 && memberRoleIds.has(overwrite.id));
-    const roleAllow = roleOverwrites.reduce((bits, overwrite) => bits | BigInt(overwrite.allow), 0n);
-    const roleDeny = roleOverwrites.reduce((bits, overwrite) => bits | BigInt(overwrite.deny), 0n);
-    permissions = (permissions & ~roleDeny) | roleAllow;
-
-    const memberOverwrite = overwrites.find((overwrite) => overwrite.type === 1 && overwrite.id === this.config.discordClientId);
-    if (memberOverwrite) permissions = applyOverwrite(permissions, memberOverwrite);
-    return (permissions & required) === required;
+    return (denied & required & ~allowed) === 0n;
   }
 
   async leaveGuild(guildId: string): Promise<void> {

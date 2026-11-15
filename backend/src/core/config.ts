@@ -2,7 +2,7 @@ import { z } from 'zod';
 
 export const APP_CONFIG = Symbol('APP_CONFIG');
 const PRODUCTION_WEB_ORIGIN = 'https://dexbotx.vercel.app';
-const PRODUCTION_BOT_PERMISSIONS = '1099780443270';
+const PRODUCTION_BOT_PERMISSIONS = '7049005315517686';
 const DEVELOPMENT_BOT_PERMISSIONS = '1099780443270';
 
 const boolish = z.enum(['true', 'false']).transform((v) => v === 'true');
@@ -14,10 +14,6 @@ const envSchema = z.object({
 
   /** Public origin of the dashboard, e.g. https://dexbotx.app (no trailing slash needed). */
   WEB_URL: z.string().url(),
-  /** Comma-separated additional public dashboard origins allowed in production. */
-  ALLOWED_WEB_ORIGINS: z.string().optional().or(z.literal('')),
-  /** Identifies whether this process serves HTTP, Discord Gateway, or queue work. */
-  DEXBOTX_PROCESS_ROLE: z.string().optional(),
   /** Public native WebSocket endpoint exposed by the API. */
   WS_PUBLIC_URL: z.string().url().default('ws://localhost:4000/ws'),
   /** Number of reverse proxies in front of the API (see .env.example). */
@@ -65,32 +61,11 @@ const envSchema = z.object({
   if (config.NODE_ENV !== 'production') return;
 
   const webUrl = new URL(config.WEB_URL);
-  const allowedWebOrigins = new Set([PRODUCTION_WEB_ORIGIN]);
-  for (const value of (config.ALLOWED_WEB_ORIGINS ?? '').split(',').map((origin) => origin.trim()).filter(Boolean)) {
-    try {
-      const allowedUrl = new URL(value);
-      if (allowedUrl.protocol === 'https:' && !['localhost', '127.0.0.1', '::1'].includes(allowedUrl.hostname)) {
-        allowedWebOrigins.add(allowedUrl.origin);
-      } else {
-        ctx.addIssue({
-          code: 'custom',
-          path: ['ALLOWED_WEB_ORIGINS'],
-          message: 'must contain public HTTPS origins',
-        });
-      }
-    } catch {
-      ctx.addIssue({
-        code: 'custom',
-        path: ['ALLOWED_WEB_ORIGINS'],
-        message: 'must contain valid HTTPS origins',
-      });
-    }
-  }
-  if (!allowedWebOrigins.has(webUrl.origin)) {
+  if (webUrl.origin !== PRODUCTION_WEB_ORIGIN) {
     ctx.addIssue({
       code: 'custom',
       path: ['WEB_URL'],
-      message: 'must be the default dashboard origin or an origin in ALLOWED_WEB_ORIGINS',
+      message: `must use ${PRODUCTION_WEB_ORIGIN} in production`,
     });
   }
   if (webUrl.protocol !== 'https:' || ['localhost', '127.0.0.1', '::1'].includes(webUrl.hostname)) {
@@ -103,11 +78,7 @@ const envSchema = z.object({
   if (new URL(config.WS_PUBLIC_URL).protocol !== 'wss:') {
     ctx.addIssue({ code: 'custom', path: ['WS_PUBLIC_URL'], message: 'must use wss:// in production' });
   }
-  const processRole = config.DEXBOTX_PROCESS_ROLE;
-  const backendSecretRequired = processRole !== 'bot'
-    && processRole !== 'worker'
-    && !/^shard\d+$/.test(processRole ?? '');
-  if (backendSecretRequired && !config.BACKEND_PROXY_SECRET) {
+  if (!config.BACKEND_PROXY_SECRET) {
     ctx.addIssue({
       code: 'custom',
       path: ['BACKEND_PROXY_SECRET'],
@@ -122,7 +93,6 @@ export interface AppConfig {
   port: number;
   logLevel: string;
   webOrigin: string;
-  allowedWebOrigins: string[];
   wsPublicUrl: string;
   redirectUri: string;
   inviteRedirectUri: string;
@@ -169,18 +139,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   const e = parsed.data;
   const webOrigin = new URL(e.WEB_URL).origin;
   const isProd = e.NODE_ENV === 'production';
-  const allowedWebOrigins = new Set([webOrigin]);
-  if (isProd) allowedWebOrigins.add(PRODUCTION_WEB_ORIGIN);
-  for (const value of (e.ALLOWED_WEB_ORIGINS ?? '').split(',').map((origin) => origin.trim()).filter(Boolean)) {
-    allowedWebOrigins.add(new URL(value).origin);
-  }
   return {
     nodeEnv: e.NODE_ENV,
     isProd,
     port: e.PORT,
     logLevel: e.LOG_LEVEL,
     webOrigin,
-    allowedWebOrigins: [...allowedWebOrigins],
     wsPublicUrl: e.WS_PUBLIC_URL,
     redirectUri: `${webOrigin}/api/auth/callback`,
     inviteRedirectUri: `${webOrigin}/api/bot/added`,

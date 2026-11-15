@@ -3,13 +3,11 @@
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { ArrowLeft, ChevronDown, ChevronUp, Send } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { useDispatch } from 'react-redux';
+import { useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
 import { Card, Field, Skeleton } from '@/components/ui/misc';
 import { Input, Select, Textarea } from '@/components/ui/input';
 import { errorMessage, errorStatus } from '@/lib/errors';
-import { adminApi } from '@/store/adminApi';
 import {
   useGetAdminMessageChannelsQuery,
   useGetGuildQuery,
@@ -23,8 +21,6 @@ export default function AdminServerDetailPage() {
   const [embedTitle, setEmbedTitle] = useState('');
   const [embedDescription, setEmbedDescription] = useState('');
   const [confirmOpen, setConfirmOpen] = useState(false);
-  const confirmDialogRef = useRef<HTMLDialogElement>(null);
-  const dispatch = useDispatch();
   const [confirmation, setConfirmation] = useState('');
   const [cooldownUntil, setCooldownUntil] = useState(0);
   const [now, setNow] = useState(Date.now());
@@ -45,12 +41,6 @@ export default function AdminServerDetailPage() {
     [messageChannels, selectedChannelId],
   );
   const cooldownSeconds = Math.max(0, Math.ceil((cooldownUntil - now) / 1000));
-
-  useEffect(() => {
-    if (confirmOpen && confirmDialogRef.current && !confirmDialogRef.current.open) {
-      confirmDialogRef.current.showModal();
-    }
-  }, [confirmOpen]);
 
   useEffect(() => {
     if (!cooldownUntil) return;
@@ -86,7 +76,6 @@ export default function AdminServerDetailPage() {
       });
       const responseBody: unknown = await response.json();
       if (!response.ok) throw new AdminMessageRequestError(response.status, responseBody, response);
-      dispatch(adminApi.util.invalidateTags(['AdminAudit', { type: 'AdminGuild', id: guildId }]));
       toast.success(`Message sent to #${selectedChannel.name}.`);
       setContent('');
       setEmbedTitle('');
@@ -242,12 +231,8 @@ export default function AdminServerDetailPage() {
       </Card>
 
       {confirmOpen && selectedChannel && (
-        <dialog
-          ref={confirmDialogRef}
-          aria-labelledby="admin-message-confirm-title"
-          onClose={() => setConfirmOpen(false)}
-          className="fixed inset-0 m-auto max-h-[90dvh] w-[calc(100%-2rem)] max-w-lg overflow-y-auto rounded-xl border border-border bg-card p-5 text-foreground shadow-2xl backdrop:bg-black/60"
-        >
+        <div className="fixed inset-0 z-[60] grid place-items-center bg-black/60 p-4">
+          <div role="dialog" aria-modal="true" aria-labelledby="admin-message-confirm-title" className="max-h-[90dvh] w-full max-w-lg overflow-y-auto rounded-xl border border-border bg-card p-5 shadow-2xl">
             <h2 id="admin-message-confirm-title" className="text-lg font-semibold">Confirm message</h2>
             <p className="mt-2 text-sm text-muted-foreground">
               Send this message to <span className="font-medium text-foreground">{detail.guild.name}</span> in <span className="font-medium text-foreground">#{selectedChannel.name}</span>?
@@ -272,7 +257,7 @@ export default function AdminServerDetailPage() {
               autoComplete="off"
             />
             <div className="mt-5 flex justify-end gap-2">
-              <button type="button" autoFocus disabled={sending} onClick={() => setConfirmOpen(false)} className="min-h-10 rounded-lg border border-border px-3 text-sm disabled:opacity-50">Cancel</button>
+              <button type="button" disabled={sending} onClick={() => setConfirmOpen(false)} className="min-h-10 rounded-lg border border-border px-3 text-sm disabled:opacity-50">Cancel</button>
               <button
                 type="button"
                 disabled={sending || confirmation !== detail.guild.name || cooldownSeconds > 0}
@@ -282,7 +267,8 @@ export default function AdminServerDetailPage() {
                 {sending ? 'Sending…' : 'Confirm and send'}
               </button>
             </div>
-          </dialog>
+          </div>
+        </div>
       )}
     </div>
   );

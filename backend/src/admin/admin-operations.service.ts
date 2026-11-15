@@ -4,9 +4,9 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Job } from 'bullmq';
-import { and, count, eq, ilike, lt, or } from 'drizzle-orm';
+import { and, count, eq, ilike, or } from 'drizzle-orm';
 import { DatabaseService } from '../db/database.service';
-import { auditLogs, guildChannels, guildRoles, guildSettings, guildTemplates, guilds, modActions } from '../db/schema';
+import { guildChannels, guildSettings, guilds } from '../db/schema';
 import { DiscordApiError, DiscordRestService } from '../discord/discord-rest.service';
 import { MemberEventsQueue, type MemberEventJob } from '../queue/member-events.queue';
 import { defaultGuildMessages } from '../shared/message-config';
@@ -14,7 +14,6 @@ import { RedisService } from '../redis/redis.service';
 import { SettingsCache } from '../redis/settings-cache.service';
 import { AdminAuditService } from './admin-audit.service';
 import { StatsService } from './stats.service';
-import { AssetStorage } from '../storage/asset-storage.service';
 
 interface FailedPost {
   guildId?: string;
@@ -33,7 +32,6 @@ export class AdminOperationsService {
     private readonly stats: StatsService,
     private readonly audit: AdminAuditService,
     private readonly memberEventsQueue: MemberEventsQueue,
-    private readonly storage: AssetStorage,
   ) {}
 
   async listGuilds(search = '', pageInput = 1) {
@@ -196,65 +194,6 @@ export class AdminOperationsService {
     );
     await this.audit.log(adminId, 'guild.leave', guildId, { name: guild.name });
     return { ok: true };
-  }
-
-  async purgeGuildData(adminId: string, guildId: string, confirm: string): Promise<{ ok: true }> {
-    const rows = await this.database.db
-      .select({ id: guilds.id, name: guilds.name })
-      .from(guilds)
-      .where(eq(guilds.id, guildId))
-      .limit(1);
-    const guild = rows[0];
-    if (!guild) throw new NotFoundException('Guild not found');
-    if (confirm !== guild.name) throw new BadRequestException('Confirmation must exactly match the server name');
-
-    const channelRows = await this.database.db
-      .select({ id: guildChannels.id })
-      .from(guildChannels)
-      .where(eq(guildChannels.guildId, guildId));
-    const backgrounds = (await this.storage.listBackgrounds()).filter((background) => background.guildId === guildId);
-    for (const background of backgrounds) await this.storage.deleteBackground(background.path);
-
-    await this.database.db.transaction(async (tx) => {
-      await tx.delete(auditLogs).where(eq(auditLogs.guildId, guildId));
-      await tx.delete(modActions).where(eq(modActions.guildId, guildId));
-      await tx.delete(guildSettings).where(eq(guildSettings.guildId, guildId));
-      await tx.delete(guildChannels).where(eq(guildChannels.guildId, guildId));
-      await tx.delete(guildRoles).where(eq(guildRoles.guildId, guildId));
-      await tx.delete(guildTemplates).where(eq(guildTemplates.guildId, guildId));
-      await tx.delete(guilds).where(eq(guilds.id, guildId));
-    });
-    await this.settings.invalidate(guildId);
-
-    const keys = [
-      ...channelRows.flatMap(({ id }) => [`chan:${id}`, `admin:can-post:${id}`]),
-      `guild:${guildId}:meta`,
-      `guild:${guildId}:channels`,
-      `guild:${guildId}:roles`,
-      `guild:${guildId}:settings`,
-      `guild:${guildId}:rev`,
-      `guild:${guildId}:refresh-cooldown`,
-      `guild:${guildId}:self-heal-lock`,
-      `botabsent:${guildId}`,
-      `rl:admin-message:guild:${guildId}`,
-      `discord:cache:channels:${guildId}`,
-      `discord:cache:system-channel:${guildId}`,
-      'admin:content',
-    ];
-    await this.redis.client.del(...keys);
-    await this.audit.log(adminId, 'guild.purge', guildId, { name: guild.name, backgrounds: backgrounds.length });
-    return { ok: true };
-  }
-
-  async pruneOldAuditLogs(adminId: string, confirm: boolean): Promise<{ removed: number; cutoff: string }> {
-    if (!confirm) throw new BadRequestException('Confirmation required');
-    const cutoff = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
-    const removed = await this.database.db
-      .delete(auditLogs)
-      .where(lt(auditLogs.createdAt, cutoff))
-      .returning({ id: auditLogs.id });
-    await this.audit.log(adminId, 'audit.prune', 'audit_logs', { removed: removed.length, cutoff: cutoff.toISOString() });
-    return { removed: removed.length, cutoff: cutoff.toISOString() };
   }
 
   async failures() {

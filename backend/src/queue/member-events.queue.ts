@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, Logger, OnApplicationShutdown } from '@nestjs/common';
 import { Queue } from 'bullmq';
 import { RedisService } from '../redis/redis.service';
 import type { MessageKind } from '../shared/message-config';
@@ -20,7 +20,7 @@ export interface MemberEventJob {
 
 /** Producer side: bot shards enqueue here, the worker process consumes. */
 @Injectable()
-export class MemberEventsQueue implements OnModuleDestroy {
+export class MemberEventsQueue implements OnApplicationShutdown {
   private readonly logger = new Logger(MemberEventsQueue.name);
   readonly queue: Queue<MemberEventJob>;
 
@@ -43,7 +43,7 @@ export class MemberEventsQueue implements OnModuleDestroy {
     await this.queue.add(job.kind, job, { jobId: `${job.kind}-${job.guildId}-${job.user.id}-${bucket}` });
   }
 
-  async onModuleDestroy(): Promise<void> {
+  async onApplicationShutdown(): Promise<void> {
     await this.queue.close();
   }
 }

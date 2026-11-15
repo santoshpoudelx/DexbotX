@@ -10,7 +10,7 @@ import { OnGatewayConnection, OnGatewayDisconnect, WebSocketGateway } from '@nes
 import type { IncomingMessage } from 'node:http';
 import type { RawData, WebSocket } from 'ws';
 import type { SessionData } from '../common/types';
-import { SESSION_REVOKED_CHANNEL, SessionService } from '../auth/session.service';
+import { SessionService } from '../auth/session.service';
 import { APP_CONFIG, AppConfig } from '../core/config';
 import { RedisService } from '../redis/redis.service';
 import { GuildsService } from '../guilds/guilds.service';
@@ -51,7 +51,6 @@ export class RealtimeGateway implements OnModuleInit, OnApplicationShutdown, OnG
 
   async onModuleInit(): Promise<void> {
     await this.redis.psubscribe('guild:*:events', (channel, message) => this.forwardEvent(channel, message));
-    await this.redis.subscribe(SESSION_REVOKED_CHANNEL, (_channel, userId) => this.closeUserSockets(userId));
 
     this.pingTimer = setInterval(() => this.pingClients(), 25_000);
     this.pingTimer.unref();
@@ -70,28 +69,20 @@ export class RealtimeGateway implements OnModuleInit, OnApplicationShutdown, OnG
     const origin = request.headers.origin;
     const requestUrl = new URL(request.url ?? '/', 'http://localhost');
     const ticket = requestUrl.searchParams.get('ticket');
-    if (!origin || !this.config.allowedWebOrigins.includes(origin) || !ticket || !/^[A-Za-z0-9_-]{43}$/.test(ticket)) {
+    if (origin !== this.config.webOrigin || !ticket || !/^[A-Za-z0-9_-]{43}$/.test(ticket)) {
       socket.close(4401, 'Unauthorized');
       return;
     }
 
     try {
-      const ticketValue = await this.redis.client.getdel(`wsticket:${ticket}`);
-      if (!ticketValue) {
+      const userId = await this.redis.client.getdel(`wsticket:${ticket}`);
+      if (!userId) {
         socket.close(4401, 'Unauthorized');
         return;
       }
 
-      const ticketData = parseTicket(ticketValue);
-      if (!ticketData) {
-        socket.close(4401, 'Unauthorized');
-        return;
-      }
-      const userId = ticketData.userId;
-      const session = ticketData.sid
-        ? await this.sessions.get(ticketData.sid)
-        : await this.sessions.findActiveForUser(userId);
-      if (!session || session.userId !== userId || !Number.isFinite(session.expiresAt) || session.expiresAt <= Date.now()) {
+      const session = await this.sessions.findActiveForUser(userId);
+      if (!session) {
         socket.close(4401, 'Unauthorized');
         return;
       }
@@ -138,10 +129,6 @@ export class RealtimeGateway implements OnModuleInit, OnApplicationShutdown, OnG
       this.leaveRoom(socket, message.guildId);
       return;
     }
-    if (!Number.isFinite(socket.session.expiresAt) || socket.session.expiresAt <= Date.now()) {
-      socket.close(4401, 'Session ended');
-      return;
-    }
 
     try {
       await this.guilds.authorizeInstalledGuild(socket.session, message.guildId);
@@ -180,10 +167,6 @@ export class RealtimeGateway implements OnModuleInit, OnApplicationShutdown, OnG
   private pingClients(): void {
     for (const sockets of this.userSockets.values()) {
       for (const socket of sockets) {
-        if (socket.session && (!Number.isFinite(socket.session.expiresAt) || socket.session.expiresAt <= Date.now())) {
-          socket.close(4401, 'Session ended');
-          continue;
-        }
         if (this.alive.get(socket) === false) {
           socket.terminate();
           continue;
@@ -191,12 +174,6 @@ export class RealtimeGateway implements OnModuleInit, OnApplicationShutdown, OnG
         this.alive.set(socket, false);
         socket.ping();
       }
-    }
-  }
-
-  private closeUserSockets(userId: string): void {
-    for (const socket of this.userSockets.get(userId) ?? []) {
-      socket.close(4401, 'Session ended');
     }
   }
 
@@ -217,26 +194,6 @@ export class RealtimeGateway implements OnModuleInit, OnApplicationShutdown, OnG
   private send(socket: ClientSocket, payload: unknown): void {
     if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(payload));
   }
-}
-
-function parseTicket(value: string): { userId: string; sid?: string } | null {
-  try {
-    const parsed: unknown = JSON.parse(value);
-    if (
-      typeof parsed === 'object'
-      && parsed !== null
-    ) {
-      const ticket = parsed as Record<string, unknown>;
-      if (typeof ticket.userId !== 'string' || (ticket.sid !== undefined && typeof ticket.sid !== 'string')) return null;
-      return {
-        userId: ticket.userId,
-        ...(typeof ticket.sid === 'string' ? { sid: ticket.sid } : {}),
-      };
-    }
-  } catch {
-    if (value) return { userId: value };
-  }
-  return value ? { userId: value } : null;
 }
 
 function isRoomMessage(value: unknown): value is RoomMessage {

@@ -26,7 +26,6 @@ import { StatsService } from '../admin/stats.service';
 import { FeatureFlagsService } from '../core/feature-flags.service';
 import { OnboardingService } from '../discord/onboarding.service';
 import { ModerationService } from './moderation.service';
-import * as Sentry from '@sentry/node';
 
 @Injectable()
 export class BotService implements OnApplicationBootstrap, OnApplicationShutdown {
@@ -137,16 +136,14 @@ export class BotService implements OnApplicationBootstrap, OnApplicationShutdown
       await fn();
     } catch (err) {
       this.logger.error(`${name} handler failed: ${(err as Error).stack ?? err}`);
-      Sentry.captureException(err);
     }
   }
 
   private async handleModerationInteraction(interaction: ChatInputCommandInteraction): Promise<void> {
     try {
       await this.moderation.handle(interaction);
-    } catch (err) {
+    } catch {
       this.logger.error(`Moderation interaction failed in guild ${interaction.guildId}`);
-      Sentry.captureException(err);
       await this.moderation.recordUnexpectedFailure(interaction.commandName);
       try {
         const reply = {
@@ -178,7 +175,6 @@ export class BotService implements OnApplicationBootstrap, OnApplicationShutdown
     this.syncTimer = setInterval(() => {
       void this.syncAll([...ready.guilds.cache.values()]);
     }, 3 * 60 * 60 * 1000);
-    this.syncTimer.unref();
   }
 
   private writeHeartbeat(): Promise<void> {
@@ -199,7 +195,7 @@ export class BotService implements OnApplicationBootstrap, OnApplicationShutdown
 
   private async syncAll(guilds: Guild[]): Promise<void> {
     for (const guild of guilds) {
-      await this.safe(`sync ${guild.id}`, () => this.sync.syncGuildFromGateway(guild));
+      await this.safe(`sync ${guild.id}`, () => this.sync.syncGuild(guild.id));
     }
     await this.safe('publish guild reconciliation', () => this.sync.notifyReconciled());
   }
@@ -257,7 +253,7 @@ export class BotService implements OnApplicationBootstrap, OnApplicationShutdown
 
   async onGuildCreate(guild: Guild): Promise<void> {
     const inserted = await this.sync.upsert(guild);
-    await this.sync.syncGuildFromGateway(guild);
+    await this.sync.syncGuild(guild.id);
     if (!this.client.isReady()) return;
 
     const joinedAt = guild.joinedTimestamp;

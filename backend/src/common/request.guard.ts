@@ -7,11 +7,6 @@ import { APP_CONFIG, AppConfig } from '../core/config';
 import { RateLimiter } from '../redis/rate-limiter.service';
 import { PUBLIC_KEY, RATE_LIMIT_KEY, RateLimitMeta } from './decorators';
 import type { AuthedRequest } from './types';
-import {
-  BACKEND_CLIENT_IP_HEADER,
-  BACKEND_PROXY_SECRET_HEADER,
-  hasValidBackendProxySecret,
-} from '../app.setup';
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 const DEFAULT_LIMIT: RateLimitMeta = { name: 'default', limit: 300, windowSeconds: 60 };
@@ -60,18 +55,13 @@ export class RequestGuard implements CanActivate {
 
     if (!SAFE_METHODS.has(req.method)) {
       const origin = req.get('origin') ?? originOf(req.get('referer'));
-      if (!origin || !this.config.allowedWebOrigins.includes(origin)) {
-        throw new ForbiddenException('Cross-site request blocked');
-      }
+      if (origin !== this.config.webOrigin) throw new ForbiddenException('Cross-site request blocked');
     }
 
     const meta =
       this.reflector.getAllAndOverride<RateLimitMeta | undefined>(RATE_LIMIT_KEY, [context.getHandler(), context.getClass()]) ??
       DEFAULT_LIMIT;
-    const hasTrustedProxy = this.config.isProd
-      && hasValidBackendProxySecret(req.get(BACKEND_PROXY_SECRET_HEADER), this.config.backendProxySecret);
-    const clientIp = (hasTrustedProxy ? req.get(BACKEND_CLIENT_IP_HEADER) : undefined) || req.ip || 'unknown';
-    const id = req.session?.userId ?? clientIp;
+    const id = req.session?.userId ?? req.ip ?? 'unknown';
     const result = await this.limiter.hit(`${meta.name}:${id}`, meta.limit, meta.windowSeconds);
     res.setHeader('RateLimit-Remaining', String(result.remaining));
     if (!result.allowed) {

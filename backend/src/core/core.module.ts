@@ -30,7 +30,7 @@ import { loadConfig } from './config';
             customSuccessMessage: (req, res) =>
               `${req.method} ${req.url?.split('?')[0]} ${res.statusCode}`,
             redact: ['req.headers.cookie', 'req.headers.authorization', 'res.headers["set-cookie"]'],
-            autoLogging: { ignore: (req) => /^\/(dexbotx\/health|health|metrics)/.test(req.url ?? '') },
+            autoLogging: { ignore: (req) => /^\/(health|metrics)/.test(req.url ?? '') },
             // Pretty logs only in local development; production emits JSON for log aggregation.
             transport: config.nodeEnv === 'development' ? { target: 'pino-pretty', options: { singleLine: true } } : undefined,
           },

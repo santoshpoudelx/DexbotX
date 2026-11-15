@@ -2,7 +2,7 @@
 
 import { Search, X } from 'lucide-react';
 import Link from 'next/link';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Card, Skeleton } from '@/components/ui/misc';
 import { errorMessage } from '@/lib/errors';
 import {
@@ -24,8 +24,6 @@ export default function AdminServersPage() {
   const [confirmation, setConfirmation] = useState('');
   const [actionError, setActionError] = useState('');
   const [busy, setBusy] = useState(false);
-  const detailDialogRef = useRef<HTMLDialogElement>(null);
-  const actionDialogRef = useRef<HTMLDialogElement>(null);
   const { data, error, isLoading, isFetching } = useGetGuildsQuery({ search, page });
   const { data: detail, isFetching: detailFetching, error: detailError } = useGetGuildQuery(selectedId ?? '', { skip: !selectedId });
   const [resyncGuild] = useResyncGuildMutation();
@@ -40,28 +38,10 @@ export default function AdminServersPage() {
     return () => window.clearTimeout(timer);
   }, [input]);
 
-  useEffect(() => {
-    if (selectedId && detailDialogRef.current && !detailDialogRef.current.open) {
-      detailDialogRef.current.showModal();
-    }
-  }, [selectedId]);
-
-  useEffect(() => {
-    if (action && actionDialogRef.current && !actionDialogRef.current.open) {
-      actionDialogRef.current.showModal();
-    }
-  }, [action]);
-
   const closeDialog = () => {
-    if (actionDialogRef.current?.open) actionDialogRef.current.close();
     setAction(null);
     setConfirmation('');
     setActionError('');
-  };
-
-  const closeDetails = () => {
-    if (detailDialogRef.current?.open) detailDialogRef.current.close();
-    setSelectedId(null);
   };
 
   const runAction = async () => {
@@ -73,7 +53,7 @@ export default function AdminServersPage() {
       if (action === 'disable') await disableGuild(selectedId).unwrap();
       if (action === 'leave') {
         await leaveGuild({ id: selectedId, confirm: confirmation }).unwrap();
-        closeDetails();
+        setSelectedId(null);
       }
       closeDialog();
     } catch (err) {
@@ -159,17 +139,11 @@ export default function AdminServersPage() {
       )}
 
       {selectedId && (
-        <dialog
-          ref={detailDialogRef}
-          aria-labelledby="guild-detail-title"
-          onClose={() => setSelectedId(null)}
-          onClick={(event) => { if (event.target === event.currentTarget) closeDetails(); }}
-          className="fixed inset-0 m-0 h-dvh max-h-none w-screen max-w-none border-0 bg-transparent p-0 backdrop:bg-black/50"
-        >
-          <aside className="ml-auto h-full w-full max-w-xl overflow-y-auto border-l border-border bg-background p-5 shadow-2xl sm:p-7">
+        <div className="fixed inset-0 z-50 flex justify-end bg-black/50" onMouseDown={(event) => { if (event.target === event.currentTarget) setSelectedId(null); }}>
+          <aside role="dialog" aria-modal="true" aria-labelledby="guild-detail-title" className="h-full w-full max-w-xl overflow-y-auto border-l border-border bg-background p-5 shadow-2xl sm:p-7">
             <div className="flex items-start justify-between gap-4">
               <div><p className="text-xs font-semibold uppercase tracking-[0.16em] text-primary">Server details</p><h2 id="guild-detail-title" className="mt-1 text-xl font-semibold">{detail?.guild.name ?? 'Loading server'}</h2></div>
-              <button type="button" aria-label="Close server details" onClick={closeDetails} className="grid size-10 place-items-center rounded-lg border border-border hover:bg-muted"><X aria-hidden className="size-4" /></button>
+              <button type="button" aria-label="Close server details" onClick={() => setSelectedId(null)} className="grid size-10 place-items-center rounded-lg border border-border hover:bg-muted"><X aria-hidden className="size-4" /></button>
             </div>
             {detailFetching && !detail ? <div className="mt-6 space-y-3"><Skeleton className="h-20 w-full" /><Skeleton className="h-32 w-full" /></div>
               : detailError ? <p role="alert" className="mt-6 text-sm text-destructive">{errorMessage(detailError)}</p>
@@ -215,16 +189,12 @@ export default function AdminServersPage() {
                   </div>
                 )}
           </aside>
-        </dialog>
+        </div>
       )}
 
       {action && detail && (
-        <dialog
-          ref={actionDialogRef}
-          aria-labelledby="guild-action-title"
-          onClose={closeDialog}
-          className="fixed inset-0 m-auto max-h-[90dvh] w-[calc(100%-2rem)] max-w-md rounded-xl border border-border bg-card p-5 text-foreground shadow-2xl backdrop:bg-black/60"
-        >
+        <div className="fixed inset-0 z-[60] grid place-items-center bg-black/60 p-4">
+          <div role="dialog" aria-modal="true" aria-labelledby="guild-action-title" className="w-full max-w-md rounded-xl border border-border bg-card p-5 shadow-2xl">
             <h2 id="guild-action-title" className="text-lg font-semibold">{actionTitle(action)}</h2>
             <p className="mt-2 text-sm text-muted-foreground">{actionDescription(action, detail.guild.name)}</p>
             {action === 'leave' && (
@@ -235,7 +205,7 @@ export default function AdminServersPage() {
             )}
             {actionError && <p role="alert" className="mt-3 text-sm text-destructive">{actionError}</p>}
             <div className="mt-5 flex justify-end gap-2">
-              <button type="button" autoFocus disabled={busy} onClick={closeDialog} className="min-h-10 rounded-lg border border-border px-3 text-sm">Cancel</button>
+              <button type="button" disabled={busy} onClick={closeDialog} className="min-h-10 rounded-lg border border-border px-3 text-sm">Cancel</button>
               <button
                 type="button"
                 disabled={busy || (action === 'leave' && confirmation !== detail.guild.name)}
@@ -245,7 +215,8 @@ export default function AdminServersPage() {
                 {busy ? 'Working…' : 'Confirm'}
               </button>
             </div>
-          </dialog>
+          </div>
+        </div>
       )}
     </div>
   );

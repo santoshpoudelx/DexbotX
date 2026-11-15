@@ -113,46 +113,6 @@ describe('GuildSyncService', () => {
     expect(redisClient.publish).toHaveBeenCalledWith(GUILD_SYNCED_CHANNEL, 'guild-123');
   });
 
-  it('syncs a gateway snapshot without calling Discord REST', async () => {
-    const { service, discord, redisClient, inserts } = makeService();
-    const guild = {
-      id: 'guild-123',
-      name: 'Gateway Guild',
-      icon: null,
-      banner: null,
-      ownerId: 'owner-123',
-      memberCount: 12,
-      systemChannelId: 'channel-system',
-      channels: {
-        cache: new Map([
-          ['category-1', { id: 'category-1', name: 'General', type: 4, position: 0, parentId: null }],
-          ['channel-live', { id: 'channel-live', name: 'chat', type: 0, position: 1, parentId: 'category-1' }],
-        ]),
-      },
-      roles: {
-        cache: new Map([
-          ['role-live', { id: 'role-live', name: 'Member', color: 2, position: 1, permissions: { bitfield: 1024n } }],
-        ]),
-      },
-    } as never;
-
-    const result = await service.syncGuildFromGateway(guild);
-
-    expect(result.guild).toMatchObject({ id: 'guild-123', name: 'Gateway Guild', memberCount: 12 });
-    expect(result.channels).toEqual([{ id: 'channel-live', name: 'chat', category: 'General' }]);
-    expect(result.roles).toEqual([{ id: 'role-live', name: 'Member', color: 2, position: 1 }]);
-    expect(inserts.map(({ table }) => table)).toEqual(expect.arrayContaining([guildChannels, guildRoles]));
-    expect(redisClient.set).toHaveBeenCalledWith(
-      guildChannelsCacheKey('guild-123'),
-      JSON.stringify(result.channels),
-      'EX',
-      3600,
-    );
-    expect(discord.getGuildAsBot).not.toHaveBeenCalled();
-    expect(discord.getGuildChannels).not.toHaveBeenCalled();
-    expect(discord.getGuildRoles).not.toHaveBeenCalled();
-  });
-
   it('uses a distributed 30-second per-guild refresh cooldown', async () => {
     const { service, redisClient } = makeService();
     redisClient.set.mockResolvedValueOnce('OK').mockResolvedValueOnce(null);

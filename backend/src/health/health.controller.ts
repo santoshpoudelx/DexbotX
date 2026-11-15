@@ -1,20 +1,13 @@
-import { Controller, Get, Head, HttpException, HttpStatus, Inject, Injectable, Logger, Req, Res } from '@nestjs/common';
+import { Controller, Get, Head, HttpException, HttpStatus, Injectable, Logger, Req, Res } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { Public } from '../common/decorators';
-import { APP_CONFIG, AppConfig } from '../core/config';
 import { DatabaseService } from '../db/database.service';
 import { RedisService } from '../redis/redis.service';
-import {
-  BACKEND_CLIENT_IP_HEADER,
-  BACKEND_PROXY_SECRET_HEADER,
-  hasValidBackendProxySecret,
-} from '../app.setup';
 
 const CHECK_TIMEOUT_MS = 2_000;
 const CACHE_TTL_MS = 10_000;
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX = 30;
-const RATE_LIMIT_MAX_ENTRIES = 5000;
 
 interface StatusResult {
   ok: boolean;
@@ -59,7 +52,6 @@ export class HealthController {
   constructor(
     private readonly database: DatabaseService,
     private readonly redis: RedisService,
-    @Inject(APP_CONFIG) private readonly config: AppConfig,
   ) {}
 
   @Public()
@@ -79,10 +71,7 @@ export class HealthController {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('X-Robots-Tag', 'noindex');
 
-    const hasTrustedProxy = this.config.isProd
-      && hasValidBackendProxySecret(req.get(BACKEND_PROXY_SECRET_HEADER), this.config.backendProxySecret);
-    const clientIp = (hasTrustedProxy ? req.get(BACKEND_CLIENT_IP_HEADER) : undefined) || req.ip || 'unknown';
-    const retryAfter = this.takeRateLimit(clientIp);
+    const retryAfter = this.takeRateLimit(req.ip ?? 'unknown');
     if (retryAfter !== undefined) {
       throw new HttpException(
         { statusCode: HttpStatus.TOO_MANY_REQUESTS, message: 'Too many requests', retryAfter },
@@ -102,10 +91,6 @@ export class HealthController {
     }
     const bucket = this.rateLimits.get(ip);
     if (!bucket || bucket.resetAt <= now) {
-      if (!this.rateLimits.has(ip) && this.rateLimits.size >= RATE_LIMIT_MAX_ENTRIES) {
-        const oldest = this.rateLimits.keys().next().value;
-        if (oldest !== undefined) this.rateLimits.delete(oldest);
-      }
       this.rateLimits.set(ip, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
       return undefined;
     }

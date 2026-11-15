@@ -17,7 +17,7 @@ export class GuildEventsController {
   stream(@CurrentSession() session: SessionData, @Req() req: AuthedRequest): Observable<MessageEvent> {
     return from(this.guilds.listForUser(session, req.sid)).pipe(
       switchMap((guilds) =>
-        this.guildEvents.stream(new Set(guilds.map((guild) => guild.id))),
+        this.guildEvents.stream(new Set(guilds.filter((guild) => guild.botInstalled).map((guild) => guild.id))),
       ),
     );
   }
