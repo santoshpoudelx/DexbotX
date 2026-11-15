@@ -76,7 +76,10 @@ export const auditLogs = pgTable(
     action: text('action').notNull(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index('audit_logs_guild_created_idx').on(t.guildId, t.createdAt)],
+  (t) => [
+    index('audit_logs_guild_created_idx').on(t.guildId, t.createdAt),
+    index('audit_logs_user_created_idx').on(t.userId, t.createdAt),
+  ],
 ).enableRLS();
 
 export const adminAudit = pgTable(
@@ -104,7 +107,10 @@ export const modActions = pgTable(
     durationSeconds: integer('duration_seconds'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index('mod_actions_guild_created_idx').on(t.guildId, t.createdAt)],
+  (t) => [
+    index('mod_actions_guild_created_idx').on(t.guildId, t.createdAt),
+    index('mod_actions_target_created_idx').on(t.targetId, t.createdAt),
+  ],
 ).enableRLS();
 
 export type GuildRow = typeof guilds.$inferSelect;

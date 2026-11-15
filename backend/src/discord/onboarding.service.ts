@@ -35,7 +35,8 @@ export class OnboardingService {
     const support = this.config.discordSupportUrl
       ? ONBOARDING_SUPPORT_LINE.replace('{supportUrl}', this.config.discordSupportUrl)
       : '';
-    const steps = ONBOARDING_STEPS.map((line) => line.replace('{guildId}', guildId));
+    const steps = ONBOARDING_STEPS.map((line) =>
+      line.replace('{guildId}', guildId).replace('{dashboardUrl}', `${this.config.webOrigin}/dashboard`));
     const description = opts.kind === 'channel'
       ? [
           ONBOARDING_CHANNEL_INTRO.replace(

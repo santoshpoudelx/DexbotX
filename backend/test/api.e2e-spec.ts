@@ -54,6 +54,7 @@ const ADMIN_ID = '888888888888888888';
 
 let pgProc: ChildProcess;
 let pgDir: string;
+let pgStderr = '';
 let redisProc: ChildProcess;
 let app: NestExpressApplication;
 let botModule: TestingModule;
@@ -271,9 +272,13 @@ function onboardingGuild(
     id,
     name: `Guild ${id}`,
     ownerId: 'owner-123456789012345678',
+    icon: null,
+    banner: null,
+    memberCount: 0,
     joinedTimestamp,
     systemChannel: systemChannel as never ?? null,
-    roles: { everyone: onboardingEveryone },
+    systemChannelId: systemChannel?.id ?? null,
+    roles: { everyone: onboardingEveryone, cache: new Map() },
     channels: { cache: new Map(channels.map((channel) => [channel.id, channel])) },
     members: { me, fetchMe: async () => me },
     fetchAuditLogs: async () => ({ entries: [] }),
@@ -302,17 +307,16 @@ async function startPostgres(dir: string): Promise<void> {
     stdio: ['ignore', 'pipe', 'pipe'],
     ...(user ? { ...user, env: { ...process.env, HOME: dir } } : {}),
   });
-  let stderr = '';
-  pgProc.stderr!.on('data', (d) => (stderr += String(d)));
+  pgProc.stderr!.on('data', (d) => (pgStderr += String(d)));
   await new Promise<void>((resolve, reject) => {
-    const t = setTimeout(() => reject(new Error(`embedded postgres start timeout\n${stderr}`)), 90000);
+    const t = setTimeout(() => reject(new Error(`embedded postgres start timeout\n${pgStderr}`)), 90000);
     pgProc.stdout!.on('data', (d) => {
       if (String(d).includes('PG_READY')) {
         clearTimeout(t);
         resolve();
       }
     });
-    pgProc.on('exit', (code) => reject(new Error(`embedded postgres exited (${code})\n${stderr}`)));
+    pgProc.on('exit', (code) => reject(new Error(`embedded postgres exited (${code})\n${pgStderr}`)));
     pgProc.on('error', reject);
   });
 }
@@ -421,11 +425,17 @@ afterAll(async () => {
   await workerModule?.close();
   redisProc?.kill('SIGTERM');
   if (pgProc && pgProc.exitCode === null) {
-    const exited = new Promise<void>((resolve) => pgProc.once('exit', () => resolve()));
+    const exited = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Embedded Postgres did not stop within 10 seconds')), 10000);
+      pgProc.once('exit', () => {
+        clearTimeout(timeout);
+        resolve();
+      });
+    });
     pgProc.kill('SIGTERM');
-    await Promise.race([exited, new Promise((r) => setTimeout(r, 10000))]);
+    await exited;
   }
-  if (pgDir) rmSync(pgDir, { recursive: true, force: true });
+  if (pgDir) rmSync(pgDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
 });
 
 describe('DexBotX API', () => {
@@ -740,9 +750,14 @@ describe('DexBotX API', () => {
     expect(url.searchParams.get('ticket')).toBe(response.body.ticket);
 
     const redis = app.get(RedisService).client;
-    expect(await redis.get(`wsticket:${response.body.ticket}`)).toBe(USER_ID);
+    const ticketKey = `wsticket:${response.body.ticket}`;
+    const storedTicket = await redis.get(ticketKey);
+    expect(JSON.parse(storedTicket!)).toEqual({
+      userId: USER_ID,
+      sid: sessionCookie.split('=')[1],
+    });
     expect(await redis.ttl(`wsticket:${response.body.ticket}`)).toBeGreaterThan(0);
-    expect(await redis.getdel(`wsticket:${response.body.ticket}`)).toBe(USER_ID);
+    expect(await redis.getdel(ticketKey)).toBe(storedTicket);
     expect(await redis.getdel(`wsticket:${response.body.ticket}`)).toBeNull();
   });
 
@@ -1482,7 +1497,10 @@ describe('DexBotX API', () => {
     const userIndexKey = `usess:${USER_ID}`;
     expect(await redis.exists(sessionKey)).toBe(1);
     expect(await redis.sismember(userIndexKey, sidHash)).toBe(1);
-    expect(Math.abs((await redis.ttl(userIndexKey)) - (await redis.ttl(sessionKey)))).toBeLessThanOrEqual(1);
+    const indexTtl = await redis.ttl(userIndexKey);
+    const sessionTtl = await redis.ttl(sessionKey);
+    expect(indexTtl).toBeGreaterThanOrEqual(sessionTtl);
+    expect(indexTtl - sessionTtl).toBeLessThanOrEqual(60);
     await redis.set(`ug:${USER_ID}`, 'cached-user-data', 'EX', 60);
 
     const logout = await http().post('/auth/logout').set(logoutAuth).expect(204);
@@ -1516,7 +1534,7 @@ describe('Guild onboarding', () => {
       .mockResolvedValueOnce(true)
       .mockResolvedValueOnce(true)
       .mockResolvedValueOnce(false);
-    const syncGuild = jest.spyOn(sync, 'syncGuild').mockResolvedValue({} as never);
+    const syncGuildFromGateway = jest.spyOn(sync, 'syncGuildFromGateway').mockResolvedValue({} as never);
     const ready = jest.spyOn(bot.client, 'isReady').mockReturnValue(false);
 
     onboardingMessages.length = 0;
@@ -1545,7 +1563,7 @@ describe('Guild onboarding', () => {
       expect(channelEmbed.description).toContain('Discord places my role at the bottom of the role list');
       expect(channelEmbed.description).toContain('Keep it below your Admin/Owner roles');
       expect(channelEmbed.description).toContain('server owners can never be timed out, kicked, or banned');
-      expect(channelEmbed.description).toContain('https://dexbotx.vercel.app/dashboard');
+      expect(channelEmbed.description).toContain(`${WEB}/dashboard`);
       expect(dmRecipients).toEqual([ownerId]);
       const dmMessage = onboardingMessages.find((message) => message.channelId === `dm-${ownerId}`);
       expect(dmMessage).toBeTruthy();
@@ -1553,7 +1571,7 @@ describe('Guild onboarding', () => {
       const dmEmbed = (dmMessage?.body.embeds as Array<{ description: string }>)[0];
       expect(dmEmbed.description).toContain(`I also posted a short hello in <#${channelId}>`);
       expect(dmEmbed.description).toContain('Move my role up (required for moderation)');
-      expect(dmEmbed.description).toContain('https://dexbotx.vercel.app/dashboard');
+      expect(dmEmbed.description).toContain(`${WEB}/dashboard`);
       expect(dmEmbed.description).not.toContain(`<@${ownerId}>`);
       expect(await redis.exists(`onboard:${onboardingGuildId}`)).toBe(1);
 
@@ -1571,7 +1589,7 @@ describe('Guild onboarding', () => {
     } finally {
       ready.mockRestore();
       upsert.mockRestore();
-      syncGuild.mockRestore();
+      syncGuildFromGateway.mockRestore();
     }
   });
 

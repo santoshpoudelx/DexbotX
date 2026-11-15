@@ -11,6 +11,7 @@ import { RedisService } from '../redis/redis.service';
 import { guildChannelsCacheKey, guildMetaCacheKey } from './guild-events';
 import { guildBannerUrl, guildIconUrl } from '../shared/discord-cdn';
 import { canManageGuild } from '../shared/permissions';
+import { sha256Hex } from '../shared/crypto';
 import { StatsService } from '../admin/stats.service';
 
 const USER_GUILDS_TTL = 60;
@@ -170,12 +171,18 @@ export class GuildsService {
       return JSON.parse(cached) as DiscordUserGuild[];
     }
     await this.stats.miss('userGuilds');
-    const blockedUntil = Number(await this.redis.client.get('discord:blocked_until'));
-    if (blockedUntil > Date.now()) {
+    const accessToken = this.sessions.accessToken(session);
+    const [blockedUntil, userBlockedUntil] = await Promise.all([
+      this.redis.client.get('discord:blocked_until'),
+      this.redis.client.get(`discord:blocked:user:${sha256Hex(`Bearer ${accessToken}`)}`),
+    ]);
+    const now = Date.now();
+    const blocked = Math.max(Number(blockedUntil ?? 0), Number(userBlockedUntil ?? 0));
+    if (blocked > now) {
       throw new ServiceUnavailableException('Discord is temporarily rate limited and no cached server list is available.');
     }
     try {
-      const list = await this.discord.getCurrentUserGuilds(this.sessions.accessToken(session));
+      const list = await this.discord.getCurrentUserGuilds(accessToken);
       await this.redis.client.set(key, JSON.stringify(list), 'EX', USER_GUILDS_TTL);
       return list;
     } catch (err) {

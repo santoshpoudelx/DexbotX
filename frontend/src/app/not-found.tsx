@@ -15,7 +15,7 @@ export default function NotFound() {
   return (
     <>
       <main className="mx-auto grid min-h-[65dvh] max-w-3xl place-items-center px-6 py-12 text-center">
-        <h1 className=" p-2 font-mono text-2xl font-bold tracking-widest text-primary sm:text-7xl">404</h1>
+        <p className="p-2 font-mono text-2xl font-bold tracking-widest text-primary sm:text-7xl">404</p>
         <div className="flex flex-col items-center">
           <Image
             src={codingGif}
@@ -28,12 +28,11 @@ export default function NotFound() {
             className="mb-6 h-auto max-h-64 w-full max-w-[480px] rounded-2xl "
           />
           <h1 className="font-mono text-2xl font-bold tracking-widest text-primary sm:text-7xl">Page Not Found</h1>
-          <h1 className="mt-3 text-4xl font-semibold tracking-tight sm:text-5xl">Nice try, script kiddie</h1>
           <p className="mt-4 text-base text-muted-foreground sm:text-lg">
-            Now go back to your cracked tools and YouTube “hacking” tutorials
+            The page you are looking for doesn&apos;t exist or has been moved.
           </p>
           <Link href="/" className={cn(buttonVariants({ size: 'lg' }), 'mt-7')}>
-            ← Crawl back to the homepage
+            ← Back to the homepage
           </Link>
         </div>
       </main>

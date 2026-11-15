@@ -1,8 +1,13 @@
 'use client';
 
 import { Button } from '@/components/ui/button';
+import { useEffect } from 'react';
 
-export default function GlobalError({ reset }: { error: Error & { digest?: string }; reset: () => void }) {
+export default function GlobalError({ error, reset }: { error: Error & { digest?: string }; reset: () => void }) {
+  useEffect(() => {
+    console.error(error);
+  }, [error]);
+
   return (
     <main className="mx-auto grid min-h-dvh max-w-md place-items-center px-6 text-center">
       <div>

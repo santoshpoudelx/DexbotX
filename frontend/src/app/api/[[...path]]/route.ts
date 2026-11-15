@@ -5,6 +5,7 @@ export const dynamic = 'force-dynamic';
 
 type RouteContext = { params: Promise<{ path?: string[] }> };
 const BACKEND_PROXY_SECRET_HEADER = 'x-dexbotx-proxy-secret';
+export const MAX_PROXY_BODY_BYTES = 2 * 1024 * 1024 + 65536;
 
 function getBackendUrl(): URL {
   const value = (process.env.BACKEND_URL ?? (process.env.NODE_ENV === 'development' ? 'http://localhost:4000' : '')).trim();
@@ -31,6 +32,10 @@ async function proxyRequest(request: NextRequest, { params }: RouteContext): Pro
   const basePath = backendUrl.pathname === '/' ? '' : backendUrl.pathname.replace(/\/+$/, '');
   const target = new URL(`${basePath}/${apiPath}${request.nextUrl.search}`, backendUrl.origin);
   const headers = new Headers(request.headers);
+  headers.delete('x-dexbotx-client-ip');
+  const forwardedIp = request.headers.get('x-real-ip')
+    ?? request.headers.get('x-forwarded-for')?.split(',')[0]?.trim();
+  if (forwardedIp?.trim()) headers.set('x-dexbotx-client-ip', forwardedIp.trim());
   headers.delete('host');
   headers.delete('connection');
   headers.delete('content-length');
@@ -47,12 +52,23 @@ async function proxyRequest(request: NextRequest, { params }: RouteContext): Pro
   }
 
   const method = request.method.toUpperCase();
+  let body: ArrayBuffer | undefined;
+  if (method !== 'GET' && method !== 'HEAD') {
+    if (Number(request.headers.get('content-length') ?? 0) > MAX_PROXY_BODY_BYTES) {
+      return Response.json({ statusCode: 413, message: 'Payload Too Large' }, { status: 413 });
+    }
+    body = await request.arrayBuffer();
+    if (body.byteLength > MAX_PROXY_BODY_BYTES) {
+      return Response.json({ statusCode: 413, message: 'Payload Too Large' }, { status: 413 });
+    }
+  }
   const response = await fetch(target, {
     method,
     headers,
-    body: method === 'GET' || method === 'HEAD' ? undefined : await request.arrayBuffer(),
+    body,
     cache: 'no-store',
     redirect: 'manual',
+    ...(apiPath === 'events/guilds' ? {} : { signal: AbortSignal.timeout(15_000) }),
   });
   const responseHeaders = new Headers(response.headers);
   responseHeaders.delete('content-encoding');

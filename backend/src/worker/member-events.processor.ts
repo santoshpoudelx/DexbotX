@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger, OnApplicationBootstrap, OnApplicationShutdown } from '@nestjs/common';
+import { Inject, Injectable, Logger, OnApplicationBootstrap, OnModuleDestroy } from '@nestjs/common';
 import { Job, UnrecoverableError, Worker } from 'bullmq';
 import { APP_CONFIG, AppConfig } from '../core/config';
 import { ChannelAccessService } from '../discord/channel-access.service';
@@ -25,7 +25,7 @@ export type JobResult = 'sent' | 'skipped-disabled' | 'skipped-stale';
  * Runs in its own process, so CPU-heavy rendering never blocks the gateway connection.
  */
 @Injectable()
-export class MemberEventsProcessor implements OnApplicationBootstrap, OnApplicationShutdown {
+export class MemberEventsProcessor implements OnApplicationBootstrap, OnModuleDestroy {
   private readonly logger = new Logger(MemberEventsProcessor.name);
   private worker?: Worker<MemberEventJob, JobResult>;
 
@@ -81,7 +81,7 @@ export class MemberEventsProcessor implements OnApplicationBootstrap, OnApplicat
     await this.worker.waitUntilReady();
   }
 
-  async onApplicationShutdown(): Promise<void> {
+  async onModuleDestroy(): Promise<void> {
     // Waits for in-flight jobs, so a deploy never drops a half-sent welcome.
     await this.worker?.close();
   }

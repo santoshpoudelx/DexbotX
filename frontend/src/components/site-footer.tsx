@@ -6,7 +6,7 @@ import { SITE } from '@/lib/site';
 
 export function SiteFooter() {
   return (
-    <footer className="relative mt-[19rem] rounded-t-[2rem] border-t border-white/10 bg-background pb-12 pt-20 shadow-[0_-12px_50px_rgba(0,0,0,0.2)] sm:mt-[22rem] sm:pt-28 md:mt-[26rem]">
+    <footer className="relative mt-[19rem] rounded-t-[2rem] border-t border-border bg-background pb-12 pt-20 shadow-[0_-12px_50px_rgba(0,0,0,0.2)] sm:mt-[22rem] sm:pt-28 md:mt-[26rem]">
       <div
         aria-hidden="true"
         className="pointer-events-none absolute inset-x-0 top-0 h-28 rounded-t-[2rem]"
@@ -19,7 +19,6 @@ export function SiteFooter() {
           width={1022}
           height={1195}
           sizes="(max-width: 640px) 94vw, (max-width: 768px) 448px, 512px"
-          loading="eager"
           className="block h-auto w-full"
         />
       </div>
@@ -67,7 +66,7 @@ export function SiteFooter() {
             </ul>
           </div>
         </nav>
-        <div className="border-t border-white/10 pt-4 text-xs text-white/55 md:col-span-2">
+        <div className="border-t border-border pt-4 text-xs text-muted-foreground md:col-span-2">
           Made by {SITE.creator}. Not affiliated with Discord Inc.
         </div>
       </div>

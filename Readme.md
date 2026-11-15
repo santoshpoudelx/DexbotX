@@ -113,7 +113,7 @@ See [backend/README.md](./backend/README.md) for backend configuration and [fron
 - Build and run the frontend with `npm run build` and `npm run start`. Set `BACKEND_URL` to the API's HTTPS URL **at build time**; Next.js uses it for the `/api/*` proxy.
 - Register `<WEB_URL>/api/auth/callback` with Discord. Keep database credentials, Redis credentials, Discord secrets, and the session encryption key on backend services only.
 
-The API exposes `GET /health` for liveness and `GET /health/ready` for PostgreSQL and Redis readiness.
+The API exposes `GET /dexbotx/health` for dependency health and readiness.
 
 ## Development
 
