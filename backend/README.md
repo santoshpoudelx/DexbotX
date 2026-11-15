@@ -10,7 +10,7 @@ The processes share PostgreSQL for application data and Redis for sessions, cach
 
 ## Requirements
 
-- Node.js 22 or newer and npm.
+- Node.js 26.x and npm.
 - A PostgreSQL database and a Redis instance reachable by the backend processes.
 - A Discord application with a bot. Enable **Server Members Intent** in the Discord Developer Portal.
 

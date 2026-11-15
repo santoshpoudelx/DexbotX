@@ -4,7 +4,7 @@ The frontend is a Next.js app for the public website, Discord dashboard, and adm
 
 ## Requirements
 
-- Node.js 22 or newer and npm.
+- Node.js 26.x and npm.
 - The backend running locally for login and API-backed features.
 
 ## Local development

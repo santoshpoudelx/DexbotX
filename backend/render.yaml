@@ -4,7 +4,7 @@ envVarGroups:
       - key: NODE_ENV
         value: production
       - key: NODE_VERSION
-        value: "22"
+        value: "26"
       - key: WEB_URL
         value: https://dexbotx.vercel.app
       - key: WS_PUBLIC_URL

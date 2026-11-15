@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "engines": {
-    "node": ">=22"
+    "node": "26.x"
   },
   "scripts": {
     "dev": "next dev",
@@ -47,5 +47,8 @@
     "typescript": "^5.9.0",
     "typescript-eslint": "^8.71.2",
     "vitest": "^5.0.5"
+  },
+  "overrides": {
+    "minimatch": "^11.0.8"
   }
 }

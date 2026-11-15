@@ -56,7 +56,7 @@ The frontend proxies API requests through `/api/*`. The backend runs as three lo
 
 ## Requirements
 
-- Node.js 22 or newer and npm.
+- Node.js 26.x and npm.
 - PostgreSQL and Redis instances reachable by the backend.
 - A Discord application and bot. Enable the **Server Members Intent** to receive join and leave events.
 
