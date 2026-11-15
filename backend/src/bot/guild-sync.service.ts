@@ -3,7 +3,7 @@ import { and, eq, notInArray, sql } from 'drizzle-orm';
 import type { Guild } from 'discord.js';
 import { DatabaseService } from '../db/database.service';
 import { guildChannels, guildRoles, guilds } from '../db/schema';
-import { DiscordApiError, DiscordChannel, DiscordRestService } from '../discord/discord-rest.service';
+import { DiscordApiError, DiscordChannel, DiscordGuild, DiscordRestService, DiscordRole } from '../discord/discord-rest.service';
 import {
   GUILD_CHANNELS_CHANGED_CHANNEL,
   GUILD_MEMBERSHIP_EVENTS_CHANNEL,
@@ -42,6 +42,16 @@ export interface GuildSyncResult {
   channels: CachedChannel[];
   roles: CachedRole[];
   lastSyncedAt: string;
+}
+
+interface GuildSnapshot {
+  id: string;
+  name: string;
+  icon: string | null;
+  banner: string | null;
+  ownerId: string | null;
+  memberCount: number;
+  systemChannelId: string | null;
 }
 
 @Injectable()
@@ -160,7 +170,7 @@ export class GuildSyncService {
   }
 
   async syncGuild(guildId: string): Promise<GuildSyncResult> {
-    let guild;
+    let guild: DiscordGuild;
     try {
       guild = await this.withRateLimitBackoff(() => this.discord.getGuildAsBot(guildId));
     } catch (error) {
@@ -171,6 +181,48 @@ export class GuildSyncService {
     }
     const rawChannels = await this.withRateLimitBackoff(() => this.discord.getGuildChannels(guildId));
     const rawRoles = await this.withRateLimitBackoff(() => this.discord.getGuildRoles(guildId));
+    return this.syncSnapshot({
+      id: guild.id,
+      name: guild.name,
+      icon: guild.icon,
+      banner: guild.banner ?? null,
+      ownerId: guild.owner_id ?? null,
+      memberCount: guild.approximate_member_count ?? 0,
+      systemChannelId: guild.system_channel_id ?? null,
+    }, rawChannels, rawRoles);
+  }
+
+  async syncGuildFromGateway(guild: Guild): Promise<GuildSyncResult> {
+    const rawChannels: DiscordChannel[] = [...guild.channels.cache.values()].map((channel) => ({
+      id: channel.id,
+      name: channel.name,
+      type: channel.type,
+      position: 'position' in channel && typeof channel.position === 'number' ? channel.position : 0,
+      parent_id: 'parentId' in channel && typeof channel.parentId === 'string' ? channel.parentId : null,
+    }));
+    const rawRoles: DiscordRole[] = [...guild.roles.cache.values()].map((role) => ({
+      id: role.id,
+      name: role.name,
+      color: role.color,
+      position: role.position,
+      permissions: role.permissions.bitfield.toString(),
+    }));
+    return this.syncSnapshot({
+      id: guild.id,
+      name: guild.name,
+      icon: guild.icon,
+      banner: guild.banner,
+      ownerId: guild.ownerId,
+      memberCount: guild.memberCount,
+      systemChannelId: guild.systemChannelId,
+    }, rawChannels, rawRoles);
+  }
+
+  private async syncSnapshot(
+    guild: GuildSnapshot,
+    rawChannels: DiscordChannel[],
+    rawRoles: DiscordRole[],
+  ): Promise<GuildSyncResult> {
     const categories = new Map(rawChannels.filter((channel) => channel.type === 4).map((channel) => [channel.id, channel.name]));
     const channels = rawChannels
       .filter((channel) => channel.type === 0 || channel.type === 5)
@@ -191,9 +243,9 @@ export class GuildSyncService {
           id: guild.id,
           name: guild.name,
           iconHash: guild.icon,
-          bannerHash: guild.banner ?? null,
-          ownerId: guild.owner_id ?? null,
-          memberCount: guild.approximate_member_count ?? 0,
+          bannerHash: guild.banner,
+          ownerId: guild.ownerId,
+          memberCount: guild.memberCount,
           installed: true,
           leftAt: null,
           lastSyncedAt,
@@ -217,7 +269,7 @@ export class GuildSyncService {
       if (rawChannels.length) {
         await tx
           .insert(guildChannels)
-          .values(rawChannels.map((channel) => toChannelRow(guildId, channel)))
+          .values(rawChannels.map((channel) => toChannelRow(guild.id, channel)))
           .onConflictDoUpdate({
             target: [guildChannels.guildId, guildChannels.id],
             set: {
@@ -227,22 +279,22 @@ export class GuildSyncService {
               position: sql`excluded.position`,
             },
           });
-        await tx.delete(guildChannels).where(and(eq(guildChannels.guildId, guildId), notInArray(guildChannels.id, rawChannels.map((channel) => channel.id))));
+        await tx.delete(guildChannels).where(and(eq(guildChannels.guildId, guild.id), notInArray(guildChannels.id, rawChannels.map((channel) => channel.id))));
       } else {
-        await tx.delete(guildChannels).where(eq(guildChannels.guildId, guildId));
+        await tx.delete(guildChannels).where(eq(guildChannels.guildId, guild.id));
       }
 
       if (roles.length) {
         await tx
           .insert(guildRoles)
-          .values(roles.map((role) => ({ guildId, ...role })))
+          .values(roles.map((role) => ({ guildId: guild.id, ...role })))
           .onConflictDoUpdate({
             target: [guildRoles.guildId, guildRoles.id],
             set: { name: sql`excluded.name`, color: sql`excluded.color`, position: sql`excluded.position` },
           });
-        await tx.delete(guildRoles).where(and(eq(guildRoles.guildId, guildId), notInArray(guildRoles.id, roles.map((role) => role.id))));
+        await tx.delete(guildRoles).where(and(eq(guildRoles.guildId, guild.id), notInArray(guildRoles.id, roles.map((role) => role.id))));
       } else {
-        await tx.delete(guildRoles).where(eq(guildRoles.guildId, guildId));
+        await tx.delete(guildRoles).where(eq(guildRoles.guildId, guild.id));
       }
     });
 
@@ -251,30 +303,30 @@ export class GuildSyncService {
         id: guild.id,
         name: guild.name,
         icon: guild.icon,
-        ownerId: guild.owner_id ?? null,
-        memberCount: guild.approximate_member_count ?? 0,
+        ownerId: guild.ownerId,
+        memberCount: guild.memberCount,
       },
       channels,
       roles,
       lastSyncedAt: lastSyncedAt.toISOString(),
     };
-    const persistedGuild = await this.database.db.select().from(guilds).where(eq(guilds.id, guildId)).limit(1);
-    if (!persistedGuild[0]) throw new Error(`Guild ${guildId} was not persisted during sync`);
-    const settings = await this.settings.get(guildId);
+    const persistedGuild = await this.database.db.select().from(guilds).where(eq(guilds.id, guild.id)).limit(1);
+    if (!persistedGuild[0]) throw new Error(`Guild ${guild.id} was not persisted during sync`);
+    const settings = await this.settings.get(guild.id);
     await Promise.all([
-      this.redis.client.set(guildMetaCacheKey(guildId), JSON.stringify(persistedGuild[0]), 'EX', META_TTL_SECONDS),
+      this.redis.client.set(guildMetaCacheKey(guild.id), JSON.stringify(persistedGuild[0]), 'EX', META_TTL_SECONDS),
       this.redis.client.set(
-        `discord:cache:system-channel:${guildId}`,
-        JSON.stringify(guild.system_channel_id ?? null),
+        `discord:cache:system-channel:${guild.id}`,
+        JSON.stringify(guild.systemChannelId),
         'EX',
         SYSTEM_CHANNEL_TTL_SECONDS,
       ),
-      this.redis.client.set(guildChannelsCacheKey(guildId), JSON.stringify(channels), 'EX', CHANNELS_TTL_SECONDS),
-      this.redis.client.set(guildRolesCacheKey(guildId), JSON.stringify(roles), 'EX', ROLES_TTL_SECONDS),
-      this.redis.client.set(guildSettingsCacheKey(guildId), JSON.stringify(settings), 'EX', 60 * 60),
-      this.redis.client.publish(GUILD_CHANNELS_CHANGED_CHANNEL, guildId),
-      this.redis.client.publish(GUILD_ROLES_CHANGED_CHANNEL, guildId),
-      this.redis.client.publish(GUILD_SYNCED_CHANNEL, guildId),
+      this.redis.client.set(guildChannelsCacheKey(guild.id), JSON.stringify(channels), 'EX', CHANNELS_TTL_SECONDS),
+      this.redis.client.set(guildRolesCacheKey(guild.id), JSON.stringify(roles), 'EX', ROLES_TTL_SECONDS),
+      this.redis.client.set(guildSettingsCacheKey(guild.id), JSON.stringify(settings), 'EX', 60 * 60),
+      this.redis.client.publish(GUILD_CHANNELS_CHANGED_CHANNEL, guild.id),
+      this.redis.client.publish(GUILD_ROLES_CHANGED_CHANNEL, guild.id),
+      this.redis.client.publish(GUILD_SYNCED_CHANNEL, guild.id),
     ]);
     return result;
   }

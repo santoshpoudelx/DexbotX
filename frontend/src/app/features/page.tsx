@@ -103,7 +103,7 @@ export default function FeaturesPage() {
           <section aria-labelledby="security">
             <h2 id="security" className="text-2xl font-semibold">Permissions and privacy by design</h2>
             <ul className="mt-4 list-disc space-y-3 pl-6 leading-7 text-muted-foreground">
-              <li>The default Discord invite does not request Administrator. Review the permissions Discord displays before approving, and grant only the access needed for the features you enable.</li>
+              <li>The default Discord invite requests Administrator, which grants broad server access. Review the permissions Discord displays and authorize only if you trust the bot.</li>
               <li>Moderation commands check both the moderator’s permission and the bot’s permission, and respect Discord’s role hierarchy.</li>
               <li>DexBotX does not request Discord’s Message Content intent or read ordinary server message text. It uses member events for join and leave features and slash-command interactions for moderation.</li>
               <li>Discord login tokens stay on the server and are encrypted before storage. The browser receives an HTTP-only session cookie.</li>

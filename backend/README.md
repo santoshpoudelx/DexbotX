@@ -59,7 +59,7 @@ The complete variable list and local defaults are in [`.env.example`](./.env.exa
 | `SESSION_ENCRYPTION_KEY` | 32-byte key encoded as 64 hexadecimal characters. |
 | `BACKEND_PROXY_SECRET` | Shared random value (at least 32 characters) required by the production API and injected by the frontend `/api/*` proxy. |
 
-For production, set `WEB_URL=https://dexbotx.vercel.app`, use `wss://` for `WS_PUBLIC_URL`, and set the same `BACKEND_PROXY_SECRET` on both the backend and frontend server deployments. Production API requests without the matching secret are rejected. The bot invite uses permission value `7049005315517686` in production and `1099780443270` in development. Register `https://dexbotx.vercel.app/api/auth/callback` in the Discord application's OAuth2 redirect URLs. Keep backend secrets out of `NEXT_PUBLIC_*` variables.
+For production, set `WEB_URL=https://dexbotx.vercel.app`, use `wss://` for `WS_PUBLIC_URL`, and set the same `BACKEND_PROXY_SECRET` on both the backend and frontend server deployments. Production API requests without the matching secret are rejected. The bot invite uses permission value `1099780443326` in all environments; this value includes Discord's Administrator permission, so review the requested access before authorizing. Register `https://dexbotx.vercel.app/api/auth/callback` in the Discord application's OAuth2 redirect URLs. Keep backend secrets out of `NEXT_PUBLIC_*` variables.
 
 Useful optional settings include `ADMIN_USER_IDS` (admin access; empty disables it), `SENTRY_DSN`, `METRICS_TOKEN`, and `WORKER_CONCURRENCY`. `SUPABASE_URL` and `SUPABASE_SERVICE_KEY` enable optional custom-background uploads through Supabase Storage; they are not required for other features.
 

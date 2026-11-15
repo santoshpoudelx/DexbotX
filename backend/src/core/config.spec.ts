@@ -22,9 +22,42 @@ describe('loadConfig', () => {
     expect(c.cookieSecure).toBe(true);
     expect(c.databaseSsl).toBe(true);
     expect(c.shardCount).toBe(1);
-    expect(c.botPermissions).toBe('7049005315517686');
+    expect(c.botPermissions).toBe('1099780443326');
     expect(c.adminUserIds).toEqual([]);
     expect(c.sessionKey).toHaveLength(32);
+  });
+
+  it('requires a proxy secret only for the production API process', () => {
+    expect(() => loadConfig({ ...valid, BACKEND_PROXY_SECRET: '', DEXBOTX_PROCESS_ROLE: 'api' } as NodeJS.ProcessEnv))
+      .toThrow(/BACKEND_PROXY_SECRET/);
+    expect(() => loadConfig({ ...valid, BACKEND_PROXY_SECRET: '' } as NodeJS.ProcessEnv))
+      .toThrow(/BACKEND_PROXY_SECRET/);
+    for (const role of ['worker', 'bot', 'shard0']) {
+      expect(loadConfig({
+        ...valid,
+        BACKEND_PROXY_SECRET: '',
+        DEXBOTX_PROCESS_ROLE: role,
+      } as NodeJS.ProcessEnv).backendProxySecret).toBeUndefined();
+    }
+    expect(() => loadConfig({
+      ...valid,
+      BACKEND_PROXY_SECRET: '',
+      DEXBOTX_PROCESS_ROLE: 'unknown',
+    } as NodeJS.ProcessEnv)).toThrow(/BACKEND_PROXY_SECRET/);
+  });
+
+  it('allows configured HTTPS dashboard origins in production', () => {
+    const config = loadConfig({
+      ...valid,
+      WEB_URL: 'https://dashboard.example.com',
+      ALLOWED_WEB_ORIGINS: 'https://dashboard.example.com,https://admin.example.com',
+    } as NodeJS.ProcessEnv);
+    expect(config.webOrigin).toBe('https://dashboard.example.com');
+    expect(config.allowedWebOrigins).toEqual(expect.arrayContaining([
+      'https://dexbotx.vercel.app',
+      'https://dashboard.example.com',
+      'https://admin.example.com',
+    ]));
   });
 
   it('uses the development bot permissions outside production', () => {
@@ -34,7 +67,7 @@ describe('loadConfig', () => {
       WEB_URL: 'http://localhost:3000',
       WS_PUBLIC_URL: 'ws://localhost:4000/ws',
     } as NodeJS.ProcessEnv);
-    expect(c.botPermissions).toBe('1099780443270');
+    expect(c.botPermissions).toBe('1099780443326');
     expect(c.backendProxySecret).toBe('z'.repeat(32));
   });
 

@@ -7,7 +7,7 @@ import { GuildsService } from './guilds.service';
 export class InviteController {
   constructor(private readonly guilds: GuildsService) {}
 
-  /** The "Add to Discord" button: redirects to Discord's bot authorization screen with minimal permissions. */
+  /** The "Add to Discord" button: redirects to Discord's bot authorization screen. */
   @Public()
   @Get()
   @RateLimit('invite', 60)

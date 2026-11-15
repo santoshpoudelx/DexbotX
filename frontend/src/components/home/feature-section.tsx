@@ -144,7 +144,7 @@ export function HomeFeatureSection({ features }: { features: readonly HomeFeatur
     <section id="features" aria-labelledby="features-heading" className="mx-auto max-w-7xl scroll-mt-24 px-4 pb-24 sm:px-6">
       <div className="mx-auto max-w-4xl text-center">
         <h2 id="features-heading" className="text-balance text-4xl font-extrabold leading-tight tracking-[-0.04em] text-white sm:text-5xl lg:text-6xl">
-          <span className="text-white">Every Tools</span>{' '}
+          <span className="text-white">Every tool</span>{' '}
           <span className="font-semibold text-white/75">you need to grow your</span>{' '}
           <span className="text-white">community server</span>
         </h2>

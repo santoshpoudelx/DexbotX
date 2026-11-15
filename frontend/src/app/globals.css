@@ -70,6 +70,15 @@ body {
   outline-offset: 2px;
 }
 
+dialog:modal {
+  overscroll-behavior: contain;
+}
+
+dialog::backdrop {
+  overflow: hidden;
+  overscroll-behavior: contain;
+}
+
 @keyframes fade-up {
   from {
     opacity: 0;

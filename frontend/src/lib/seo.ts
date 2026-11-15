@@ -21,7 +21,7 @@ export const FAQS = [
   {
     question: 'Which Discord permissions does DexBotX need, and why?',
     answer:
-      'The Discord authorization screen shows the requested permissions before you approve an installation. DexBotX does not request Administrator. It uses permissions for its features, such as posting configured welcome messages and cards and running moderation commands. Moderation also checks the acting member’s permissions and Discord role hierarchy.',
+      'The Discord authorization screen shows the requested permissions before you approve an installation. DexBotX requests Administrator, which grants broad server access. Review the permissions and authorize only if you trust the bot. Moderation also checks the acting member’s permissions and Discord role hierarchy.',
   },
   {
     question: 'How do I add DexBotX to my server?',

@@ -33,9 +33,11 @@ function makeGateway() {
       }),
     },
     psubscribe: jest.fn(async (_pattern: string, _handler: (channel: string, message: string) => void) => undefined),
+    subscribe: jest.fn(async (_channel: string, _handler: (channel: string, message: string) => void) => undefined),
   };
   const sessions = {
-    findActiveForUser: jest.fn(async (userId: string) => ({ userId } as never)),
+    get: jest.fn(async (_sid: string) => ({ userId: USER_1, expiresAt: Date.now() + 60_000 } as never)),
+    findActiveForUser: jest.fn(async (userId: string) => ({ userId, expiresAt: Date.now() + 60_000 } as never)),
   };
   const guilds = {
     authorizeInstalledGuild: jest.fn(async (_session: unknown, guildId: string) => {
@@ -47,7 +49,7 @@ function makeGateway() {
     redis as never,
     sessions as never,
     guilds as never,
-    { webOrigin: ORIGIN } as never,
+    { webOrigin: ORIGIN, allowedWebOrigins: [ORIGIN] } as never,
   );
   const controller = new RealtimeController(
     { client: { set: jest.fn(async (key: string, userId: string) => tickets.set(key.slice('wsticket:'.length), userId)) } } as never,
@@ -88,6 +90,26 @@ describe('RealtimeController', () => {
     expect(new URL(result.url).searchParams.get('ticket')).toBe(result.ticket);
     expect(set).toHaveBeenCalledWith(`wsticket:${result.ticket}`, USER_1, 'EX', 30);
   });
+
+  it('stores the session id with the ticket when the request includes one', async () => {
+    const { controller } = makeGateway();
+    const set = jest.spyOn(
+      (controller as unknown as { redis: { client: { set: jest.Mock } } }).redis.client,
+      'set',
+    );
+
+    const result = await controller.createTicket({
+      session: { userId: USER_1 },
+      sid: 'a'.repeat(43),
+    } as never);
+
+    expect(set).toHaveBeenCalledWith(
+      `wsticket:${result.ticket}`,
+      JSON.stringify({ userId: USER_1, sid: 'a'.repeat(43) }),
+      'EX',
+      30,
+    );
+  });
 });
 
 describe('RealtimeGateway', () => {
@@ -97,6 +119,23 @@ describe('RealtimeGateway', () => {
     const socket = await connect(gateway, 'a'.repeat(43));
 
     expect(socket.close).toHaveBeenCalledWith(4401, 'Unauthorized');
+  });
+
+  it('rejects expired sessions and authenticates a ticket against its specific session id', async () => {
+    const { gateway, controller, sessions } = makeGateway();
+    sessions.findActiveForUser.mockResolvedValueOnce({ userId: USER_1, expiresAt: Date.now() - 1 } as never);
+    const expiredTicket = await controller.createTicket({ session: { userId: USER_1 } } as never);
+    const expiredSocket = await connect(gateway, expiredTicket.ticket);
+    expect(expiredSocket.close).toHaveBeenCalledWith(4401, 'Unauthorized');
+
+    const specificTicket = await controller.createTicket({
+      session: { userId: USER_1 },
+      sid: 'a'.repeat(43),
+    } as never);
+    const specificSocket = await connect(gateway, specificTicket.ticket);
+
+    expect(sessions.get).toHaveBeenCalledWith('a'.repeat(43));
+    expect(specificSocket.close).not.toHaveBeenCalled();
   });
 
   it('rejects an incorrect origin and consumes valid tickets only once', async () => {
@@ -120,7 +159,7 @@ describe('RealtimeGateway', () => {
 
     await sendMessage(socket, { type: 'join', guildId: GUILD_2 });
 
-    expect(guilds.authorizeInstalledGuild).toHaveBeenCalledWith({ userId: USER_2 }, GUILD_2);
+    expect(guilds.authorizeInstalledGuild).toHaveBeenCalledWith(expect.objectContaining({ userId: USER_2 }), GUILD_2);
     expect(socket.send).toHaveBeenCalledWith(JSON.stringify({ type: 'error', code: 'forbidden', guildId: GUILD_2 }));
   });
 
@@ -167,5 +206,24 @@ describe('RealtimeGateway', () => {
       rev: 4,
     }));
     expect(elsewhere.send).not.toHaveBeenCalled();
+  });
+
+  it('closes all of a user’s sockets when their sessions are revoked', async () => {
+    const { gateway, controller, redis } = makeGateway();
+    const { ticket: ticket1 } = await controller.createTicket({ session: { userId: USER_1 } } as never);
+    const { ticket: ticket2 } = await controller.createTicket({ session: { userId: USER_1 } } as never);
+    const first = await connect(gateway, ticket1);
+    const second = await connect(gateway, ticket2);
+    const handlers = new Map<string, (channel: string, message: string) => void>();
+    redis.subscribe.mockImplementation(async (channel, handler) => {
+      handlers.set(channel, handler);
+    });
+
+    await gateway.onModuleInit();
+    handlers.get('dexbotx:sessions:revoked')?.('dexbotx:sessions:revoked', USER_1);
+
+    expect(first.close).toHaveBeenCalledWith(4401, 'Session ended');
+    expect(second.close).toHaveBeenCalledWith(4401, 'Session ended');
+    await gateway.onApplicationShutdown();
   });
 });
