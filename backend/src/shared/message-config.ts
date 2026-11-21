@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { defaultAutoRoleConfig, type AutoRoleConfig } from './auto-roles';
 
 export const MESSAGE_KINDS = ['welcome', 'goodbye'] as const;
 export type MessageKind = (typeof MESSAGE_KINDS)[number];
@@ -57,6 +58,7 @@ export type MessageContent = Omit<MessageConfig, 'enabled' | 'channelId'>;
 export interface GuildMessages {
   welcome: MessageConfig;
   goodbye: MessageConfig;
+  autoRoles: AutoRoleConfig;
 }
 
 export function defaultMessageConfig(kind: MessageKind): MessageConfig {
@@ -65,7 +67,7 @@ export function defaultMessageConfig(kind: MessageKind): MessageConfig {
       enabled: false,
       channelId: null,
       content: 'Welcome to **{server}**, {user}! 🎉',
-      embed: { enabled: false, title: 'Welcome, {displayName}!', description: 'You are member **{memberCountOrdinal}** of {server}.', color: '#5b4bff', footer: '' },
+      embed: { enabled: false, title: 'Welcome, {displayName}!', description: 'You are member **{memberCountOrdinal}** of {server}.', color: '#5b4bff', footer: 'Don\'t forget to check out the server channels and follow the rules.' },
       image: {
         enabled: true,
         style: 'midnight',
@@ -83,7 +85,7 @@ export function defaultMessageConfig(kind: MessageKind): MessageConfig {
     enabled: false,
     channelId: null,
     content: '**{username}** just left **{server}**. Take care! 👋',
-    embed: { enabled: false, title: 'Goodbye, {displayName}', description: 'We are now **{memberCount}** members.', color: '#f97316', footer: '' },
+    embed: { enabled: false, title: 'Goodbye, {displayName}', description: 'We are now **{memberCount}** members.', color: '#f97316', footer: 'Bye Bye 👋' },
     image: {
       enabled: true,
       style: 'sunset',
@@ -99,7 +101,7 @@ export function defaultMessageConfig(kind: MessageKind): MessageConfig {
 }
 
 export function defaultGuildMessages(): GuildMessages {
-  return { welcome: defaultMessageConfig('welcome'), goodbye: defaultMessageConfig('goodbye') };
+  return { welcome: defaultMessageConfig('welcome'), goodbye: defaultMessageConfig('goodbye'), autoRoles: defaultAutoRoleConfig() };
 }
 
 /** Parse stored JSON; fall back to defaults when the stored shape is no longer valid. */

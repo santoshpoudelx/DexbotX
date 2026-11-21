@@ -20,7 +20,7 @@ interface Connection {
 interface GuildEvent {
   type: string;
   guildId: string;
-  kind?: 'channels' | 'roles' | 'installed';
+  kind?: 'channels' | 'roles' | 'installed' | 'settings';
   rev?: number;
 }
 
@@ -191,6 +191,8 @@ function handleSocketMessage(connection: Connection, raw: unknown): void {
     acceptChannelRevision(connection, event.rev);
   } else if (event.kind === 'channels' && typeof event.rev === 'number') {
     acceptChannelRevision(connection, event.rev);
+  } else if (event.kind === 'settings') {
+    connection.dispatch(api.util.invalidateTags([{ type: 'Guild', id: connection.guildId }]));
   }
 }
 
@@ -235,5 +237,6 @@ function isGuildEvent(value: unknown): value is GuildEvent {
       || event.kind === 'channels'
       || event.kind === 'roles'
       || event.kind === 'installed'
+      || event.kind === 'settings'
     );
 }

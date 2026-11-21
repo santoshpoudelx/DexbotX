@@ -78,6 +78,8 @@ export interface DiscordRole {
   position: number;
   permissions?: string;
   hoist?: boolean;
+  managed?: boolean;
+  tags?: Record<string, unknown>;
 }
 
 @Injectable()
@@ -251,11 +253,11 @@ export class DiscordRestService {
     return channels;
   }
 
-  async canBotPost(channelId: string): Promise<boolean> {
+  async canBotPost(channelId: string, includeEmbed = false): Promise<boolean> {
     const channel = await this.request<DiscordChannel>(`/channels/${channelId}`, { headers: this.bot() });
     if (!channel.guild_id) return false;
     const overwrites = channel.permission_overwrites ?? [];
-    const required = (1n << 10n) | (1n << 11n);
+    const required = (1n << 10n) | (1n << 11n) | (includeEmbed ? 1n << 14n : 0n);
     const applyOverwrite = (permissions: bigint, overwrite: { allow: string; deny: string }) =>
       (permissions & ~BigInt(overwrite.deny)) | BigInt(overwrite.allow);
     const overwriteOnlyCheck = (): boolean => {
@@ -330,10 +332,10 @@ export class DiscordRestService {
     return this.request<{ roles: string[] }>(`/guilds/${guildId}/members/${userId}`, { headers: this.bot() });
   }
 
-  async addMemberRole(guildId: string, userId: string, roleId: string): Promise<void> {
+  async addMemberRole(guildId: string, userId: string, roleId: string, reason?: string): Promise<void> {
     await this.request<void>(`/guilds/${guildId}/members/${userId}/roles/${roleId}`, {
       method: 'PUT',
-      headers: this.bot(),
+      headers: { ...this.bot(), ...(reason ? { 'X-Audit-Log-Reason': encodeURIComponent(reason) } : {}) },
     });
   }
 

@@ -62,14 +62,25 @@ async function proxyRequest(request: NextRequest, { params }: RouteContext): Pro
       return Response.json({ statusCode: 413, message: 'Payload Too Large' }, { status: 413 });
     }
   }
-  const response = await fetch(target, {
-    method,
-    headers,
-    body,
-    cache: 'no-store',
-    redirect: 'manual',
-    ...(apiPath === 'events/guilds' ? {} : { signal: AbortSignal.timeout(15_000) }),
-  });
+  let response: Response;
+  try {
+    response = await fetch(target, {
+      method,
+      headers,
+      body,
+      cache: 'no-store',
+      redirect: 'manual',
+      ...(apiPath === 'events/guilds' ? {} : { signal: AbortSignal.timeout(15_000) }),
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'TimeoutError') {
+      return Response.json(
+        { statusCode: 504, message: 'The backend request timed out. Please try again.' },
+        { status: 504 },
+      );
+    }
+    throw error;
+  }
   const responseHeaders = new Headers(response.headers);
   responseHeaders.delete('content-encoding');
   responseHeaders.delete('content-length');

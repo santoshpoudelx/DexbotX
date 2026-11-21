@@ -12,6 +12,16 @@ interface Props {
   card: { url: string | null; loading: boolean; error: string | null };
 }
 
+export function DiscordMessageAuthor() {
+  return (
+    <div className="flex items-center gap-2">
+      <span className="font-medium text-white">DexBotX</span>
+      <span className="rounded bg-[#5865f2] px-1.5 text-[10px] font-semibold uppercase leading-4 text-white">App</span>
+      <span className="text-xs text-[#949ba4]">Today at 12:00</span>
+    </div>
+  );
+}
+
 /** Approximates how Discord shows the bot's message. Text and embed update instantly; the card comes from the server. */
 export function DiscordPreview({ config, ctx, channelName, card }: Props) {
   const msg = (text: string) => applyPlaceholders(text, ctx, 'message');
@@ -40,11 +50,7 @@ export function DiscordPreview({ config, ctx, channelName, card }: Props) {
       <div className="flex gap-3.5 px-4 py-4">
         <LogoMark className="size-10 shrink-0" />
         <div className="min-w-0 flex-1 text-[15px] leading-[1.4]">
-          <div className="flex items-center gap-2">
-            <span className="font-medium text-white">DexBotX</span>
-            <span className="rounded bg-[#5865f2] px-1.5 text-[10px] font-semibold uppercase leading-4 text-white">App</span>
-            <span className="text-xs text-[#949ba4]">Today at 12:00</span>
-          </div>
+          <DiscordMessageAuthor />
 
           {empty && <p className="mt-1 text-sm italic text-[#949ba4]">Nothing to send. Turn on text, an embed or the image card.</p>}
 

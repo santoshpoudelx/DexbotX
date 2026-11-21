@@ -65,6 +65,46 @@ export interface GuildDetail {
 export interface GuildSettings {
   welcome: MessageConfig;
   goodbye: MessageConfig;
+  autoRoles?: AutoRoleConfig;
+}
+
+export interface AutoRoleConfig {
+  enabled: boolean;
+  roleIds: string[];
+  delayMode: 'smart' | 'fixed';
+  minDelaySeconds: number;
+  fixedDelaySeconds: number;
+  skipBots: boolean;
+  waitForScreening: boolean;
+  announce: {
+    enabled: boolean;
+    channelId: string | null;
+    message: string;
+    embed: EmbedConfig;
+  };
+}
+
+export interface AutoRoleResponse {
+  config: AutoRoleConfig;
+  roles: {
+    assignable: GuildRole[];
+    hidden: Array<{ id: string; name: string; reason: string }>;
+  };
+  checks: {
+    hasManageRoles: boolean;
+    roleBelowBot: boolean;
+    canSendInChannel: boolean;
+  };
+  canTest: boolean;
+}
+
+export interface AutoRoleActivity {
+  id: number;
+  guildId: string;
+  userId: string;
+  roleId: string;
+  outcome: 'assigned' | 'skipped_left' | 'skipped_has_role' | 'skipped_unsafe' | 'failed';
+  createdAt: string;
 }
 
 export interface SavedMessage {

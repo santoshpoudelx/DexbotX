@@ -8,6 +8,7 @@ import {
   MessageKind,
   normalizeMessageConfig,
 } from '../shared/message-config';
+import { normalizeAutoRoleConfig } from '../shared/auto-roles';
 import { GUILD_SETTINGS_CHANGED_CHANNEL, guildSettingsCacheKey } from '../guilds/guild-events';
 import { RedisService } from './redis.service';
 import { StatsService } from '../admin/stats.service';
@@ -81,15 +82,19 @@ export class SettingsCache implements OnModuleInit {
   }
 
   private parse(raw: unknown): GuildMessages {
-    const r = (raw ?? {}) as Partial<Record<MessageKind, unknown>>;
-    return { welcome: normalizeMessageConfig('welcome', r.welcome), goodbye: normalizeMessageConfig('goodbye', r.goodbye) };
+    const r = (raw ?? {}) as Partial<Record<MessageKind | 'autoRoles', unknown>>;
+    return {
+      welcome: normalizeMessageConfig('welcome', r.welcome),
+      goodbye: normalizeMessageConfig('goodbye', r.goodbye),
+      autoRoles: normalizeAutoRoleConfig(r.autoRoles),
+    };
   }
 
   private async loadFromDb(guildId: string): Promise<GuildMessages> {
     const rows = await this.database.db.select().from(guildSettings).where(eq(guildSettings.guildId, guildId)).limit(1);
     const row = rows[0];
     if (!row) return defaultGuildMessages();
-    return this.parse({ welcome: row.welcome, goodbye: row.goodbye });
+    return this.parse({ welcome: row.welcome, goodbye: row.goodbye, autoRoles: row.autoRoles });
   }
 
   private setL1(guildId: string, value: GuildMessages): void {

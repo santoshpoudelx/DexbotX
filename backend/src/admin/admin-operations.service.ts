@@ -8,13 +8,14 @@ import { and, count, eq, ilike, lt, or } from 'drizzle-orm';
 import { DatabaseService } from '../db/database.service';
 import { auditLogs, guildChannels, guildRoles, guildSettings, guildTemplates, guilds, modActions } from '../db/schema';
 import { DiscordApiError, DiscordRestService } from '../discord/discord-rest.service';
-import { MemberEventsQueue, type MemberEventJob } from '../queue/member-events.queue';
+import { MemberEventsQueue, type AutoRoleJob, type MemberEventJob } from '../queue/member-events.queue';
 import { defaultGuildMessages } from '../shared/message-config';
 import { RedisService } from '../redis/redis.service';
 import { SettingsCache } from '../redis/settings-cache.service';
 import { AdminAuditService } from './admin-audit.service';
 import { StatsService } from './stats.service';
 import { AssetStorage } from '../storage/asset-storage.service';
+import { defaultAutoRoleConfig } from '../shared/auto-roles';
 
 interface FailedPost {
   guildId?: string;
@@ -171,7 +172,7 @@ export class AdminOperationsService {
     const goodbye = { ...(settings[0]?.goodbye ?? defaults.goodbye), enabled: false };
     await this.database.db
       .insert(guildSettings)
-      .values({ guildId, welcome, goodbye, updatedBy: adminId, updatedAt: new Date() })
+      .values({ guildId, welcome, goodbye, autoRoles: defaultAutoRoleConfig(), updatedBy: adminId, updatedAt: new Date() })
       .onConflictDoUpdate({
         target: guildSettings.guildId,
         set: { welcome, goodbye, updatedBy: adminId, updatedAt: new Date() },
@@ -315,6 +316,6 @@ function mapFailureReason(reason: string): 'missing permission' | 'deleted chann
   return 'other';
 }
 
-function safeJobTarget(job: Job<MemberEventJob>): Record<string, unknown> {
+function safeJobTarget(job: Job<MemberEventJob | AutoRoleJob>): Record<string, unknown> {
   return { guildId: job.data.guildId, kind: job.data.kind };
 }

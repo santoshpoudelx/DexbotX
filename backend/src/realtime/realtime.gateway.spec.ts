@@ -206,6 +206,24 @@ describe('RealtimeGateway', () => {
       rev: 4,
     }));
     expect(elsewhere.send).not.toHaveBeenCalled();
+
+    (gateway as unknown as { forwardEvent: (channel: string, message: string) => void })
+      .forwardEvent(`guild:${GUILD_1}:events`, JSON.stringify({
+        type: 'updated',
+        guildId: GUILD_1,
+        kind: 'settings',
+        rev: 5,
+        data: {},
+      }));
+
+    expect(inRoom.send).toHaveBeenCalledWith(JSON.stringify({
+      type: 'updated',
+      guildId: GUILD_1,
+      kind: 'settings',
+      data: {},
+      rev: 5,
+    }));
+    expect(elsewhere.send).not.toHaveBeenCalled();
   });
 
   it('closes all of a user’s sockets when their sessions are revoked', async () => {

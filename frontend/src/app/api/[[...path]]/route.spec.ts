@@ -121,6 +121,41 @@ describe('API route proxy security header', () => {
     expect(response.status).toBe(413);
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it('returns a gateway timeout when the backend request exceeds the proxy deadline', async () => {
+    const fetchMock = vi.fn(async () => {
+      throw new DOMException('The operation was aborted due to timeout', 'TimeoutError');
+    });
+    vi.stubEnv('NODE_ENV', 'development');
+    vi.stubEnv('BACKEND_URL', 'http://localhost:4000');
+    vi.stubGlobal('fetch', fetchMock);
+
+    const response = await PUT(new NextRequest('https://dexbotx.vercel.app/api/guilds/123/auto-roles', {
+      method: 'PUT',
+      body: JSON.stringify({ enabled: false }),
+    }), { params: Promise.resolve({ path: ['guilds', '123', 'auto-roles'] }) });
+
+    expect(response.status).toBe(504);
+    await expect(response.json()).resolves.toEqual({
+      statusCode: 504,
+      message: 'The backend request timed out. Please try again.',
+    });
+  });
+
+  it('does not mask non-timeout backend connection failures', async () => {
+    const fetchMock = vi.fn(async () => {
+      throw new TypeError('Backend connection failed');
+    });
+    vi.stubEnv('NODE_ENV', 'development');
+    vi.stubEnv('BACKEND_URL', 'http://localhost:4000');
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(PUT(new NextRequest('https://dexbotx.vercel.app/api/guilds/123/auto-roles', {
+      method: 'PUT',
+      body: JSON.stringify({ enabled: false }),
+    }), { params: Promise.resolve({ path: ['guilds', '123', 'auto-roles'] }) }))
+      .rejects.toThrow('Backend connection failed');
+  });
 });
 
 describe('API route proxy methods and redirects', () => {

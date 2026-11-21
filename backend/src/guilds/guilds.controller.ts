@@ -1,12 +1,13 @@
-import { Controller, Get, HttpCode, HttpException, HttpStatus, Post, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, HttpException, HttpStatus, Post, Put, Req, UseGuards } from '@nestjs/common';
 import { GuildSyncService } from '../bot/guild-sync.service';
-import { CurrentSession } from '../common/decorators';
+import { CurrentSession, RateLimit } from '../common/decorators';
 import type { AuthedRequest, SessionData } from '../common/types';
 import { SettingsCache } from '../redis/settings-cache.service';
 import { GuildAccessGuard } from './guild-access.guard';
 import { GuildsService } from './guilds.service';
 import { createCardKey } from '../shared/card-key';
 import type { MessageKind } from '../shared/message-config';
+import { AutoRolesService } from './auto-roles.service';
 
 @Controller('guilds')
 export class GuildsController {
@@ -14,6 +15,7 @@ export class GuildsController {
     private readonly guilds: GuildsService,
     private readonly settings: SettingsCache,
     private readonly sync: GuildSyncService,
+    private readonly autoRoles: AutoRolesService,
   ) {}
 
   @Get()
@@ -34,6 +36,7 @@ export class GuildsController {
     return {
       guild: this.guilds.toDetail(guild),
       settings,
+      autoRoles: await this.autoRoles.get(guild),
       imageKeys,
       assetHashes: { avatar: session.avatarHash, banner: guild.bannerHash },
     };
@@ -60,5 +63,33 @@ export class GuildsController {
       throw new HttpException('This server was refreshed recently. Try again in 30 seconds.', HttpStatus.TOO_MANY_REQUESTS);
     }
     return this.sync.syncGuild(guildId);
+  }
+
+  @Put(':guildId/auto-roles')
+  @RateLimit('auto-roles-save', 30)
+  @UseGuards(GuildAccessGuard)
+  async saveAutoRoles(
+    @Req() req: AuthedRequest,
+    @CurrentSession() session: SessionData,
+    @Body() body: unknown,
+  ) {
+    return this.autoRoles.save(req.guild!, session, body);
+  }
+
+  @Post(':guildId/auto-roles/test')
+  @HttpCode(200)
+  @RateLimit('auto-roles-test', 3)
+  @UseGuards(GuildAccessGuard)
+  async testAutoRoles(
+    @Req() req: AuthedRequest,
+    @CurrentSession() session: SessionData,
+  ) {
+    return this.autoRoles.test(req.guild!, session);
+  }
+
+  @Get(':guildId/auto-roles/activity')
+  @UseGuards(GuildAccessGuard)
+  async autoRoleActivity(@Req() req: AuthedRequest) {
+    return { activity: await this.autoRoles.activity(req.guild!.id) };
   }
 }

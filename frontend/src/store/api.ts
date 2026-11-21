@@ -21,6 +21,9 @@ import type {
   MessageKind,
   Preset,
   SavedMessage,
+  AutoRoleConfig,
+  AutoRoleResponse,
+  AutoRoleActivity,
 } from '@/lib/types';
 
 const rawBaseQuery = fetchBaseQuery({
@@ -72,6 +75,7 @@ export const api = createApi({
     getGuild: b.query<{
       guild: GuildDetail;
       settings: GuildSettings;
+      autoRoles: AutoRoleResponse;
       imageKeys: Record<MessageKind, string | null>;
       assetHashes: { avatar: string | null; banner: string | null };
     }, string>({
@@ -142,6 +146,26 @@ export const api = createApi({
     sendTest: b.mutation<{ channelId: string }, { guildId: string; kind: MessageKind }>({
       query: ({ guildId, kind }) => ({ url: `/guilds/${guildId}/messages/${kind}/test`, method: 'POST' }),
     }),
+    saveAutoRoles: b.mutation<AutoRoleResponse, { guildId: string; config: AutoRoleConfig }>({
+      query: ({ guildId, config }) => ({ url: `/guilds/${guildId}/auto-roles`, method: 'PUT', body: config }),
+      async onQueryStarted({ guildId }, { dispatch, queryFulfilled }) {
+        try {
+          const { data } = await queryFulfilled;
+          dispatch(api.util.updateQueryData('getGuild', guildId, (current) => {
+            current.autoRoles = data;
+          }));
+        } catch {
+          // The mutation result reports save failures to its caller.
+        }
+      },
+    }),
+    testAutoRoles: b.mutation<{ channelId: string }, string>({
+      query: (guildId) => ({ url: `/guilds/${guildId}/auto-roles/test`, method: 'POST' }),
+    }),
+    getAutoRoleActivity: b.query<{ activity: AutoRoleActivity[] }, string>({
+      query: (guildId) => `/guilds/${guildId}/auto-roles/activity`,
+      keepUnusedDataFor: 30,
+    }),
   }),
 });
 
@@ -181,5 +205,8 @@ export const {
   useSaveMessageMutation,
   useResetMessageMutation,
   useSendTestMutation,
+  useSaveAutoRolesMutation,
+  useTestAutoRolesMutation,
+  useGetAutoRoleActivityQuery,
   useUploadBackgroundMutation,
 } = api;
