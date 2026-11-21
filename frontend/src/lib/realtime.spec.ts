@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { makeStore } from '@/store';
+import { api } from '@/store/api';
 import { connect } from './realtime';
 
 describe('realtime connection lifecycle', () => {
@@ -40,6 +41,45 @@ describe('realtime connection lifecycle', () => {
     const releaseThird = connect('12345678901234567', dispatch);
     expect(fetchTicket).toHaveBeenCalledTimes(2);
     releaseThird();
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+  });
+
+  it('invalidates guild settings when a settings revision arrives over the socket', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('document', {
+      visibilityState: 'visible',
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ url: 'wss://example.test/ws' }),
+    }));
+    const listeners = new Map<string, EventListenerOrEventListenerObject>();
+    vi.stubGlobal('WebSocket', class {
+      addEventListener(type: string, listener: EventListenerOrEventListenerObject) {
+        listeners.set(type, listener);
+      }
+      close() {}
+      send() {}
+    });
+
+    const guildId = '12345678901234567';
+    const store = makeStore();
+    const dispatch = vi.spyOn(store, 'dispatch');
+    const release = connect(guildId, store.dispatch);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const message = listeners.get('message');
+    if (typeof message === 'function') {
+      message(new MessageEvent('message', {
+        data: JSON.stringify({ type: 'updated', guildId, kind: 'settings', data: {}, rev: 1 }),
+      }));
+    }
+
+    expect(dispatch).toHaveBeenCalledWith(api.util.invalidateTags([{ type: 'Guild', id: guildId }]));
+    release();
     await vi.advanceTimersByTimeAsync(5 * 60_000);
   });
 });

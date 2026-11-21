@@ -18,14 +18,25 @@ export interface MemberEventJob {
   guild: { name: string; memberCount: number; bannerUrl: string | null };
 }
 
+export interface AutoRoleJob {
+  kind: 'auto-role';
+  guildId: string;
+  userId: string;
+  username: string;
+  joinTimestamp: number;
+  pending: boolean;
+  memberRoleIds: string[];
+  rateLimitReschedules?: number;
+}
+
 /** Producer side: bot shards enqueue here, the worker process consumes. */
 @Injectable()
 export class MemberEventsQueue implements OnModuleDestroy {
   private readonly logger = new Logger(MemberEventsQueue.name);
-  readonly queue: Queue<MemberEventJob>;
+  readonly queue: Queue<MemberEventJob | AutoRoleJob>;
 
   constructor(redis: RedisService) {
-    this.queue = new Queue<MemberEventJob>(MEMBER_EVENTS_QUEUE, {
+    this.queue = new Queue<MemberEventJob | AutoRoleJob>(MEMBER_EVENTS_QUEUE, {
       connection: redis.client,
       defaultJobOptions: {
         attempts: 5,
@@ -41,6 +52,17 @@ export class MemberEventsQueue implements OnModuleDestroy {
     // The 15s bucket drops duplicate gateway deliveries of the same join/leave.
     const bucket = Math.floor(Date.now() / 15_000);
     await this.queue.add(job.kind, job, { jobId: `${job.kind}-${job.guildId}-${job.user.id}-${bucket}` });
+  }
+
+  async enqueueAutoRole(job: AutoRoleJob, delaySeconds: number): Promise<void> {
+    await this.queue.add('auto-role', job, {
+      jobId: `autorole:${job.guildId}:${job.userId}:${job.joinTimestamp}`,
+      delay: delaySeconds * 1000,
+      attempts: 3,
+      backoff: { type: 'exponential', delay: 2000 },
+      removeOnComplete: { age: 3600, count: 1000 },
+      removeOnFail: { age: 24 * 3600, count: 5000 },
+    });
   }
 
   async onModuleDestroy(): Promise<void> {

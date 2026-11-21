@@ -1,8 +1,8 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { and, eq, notInArray, sql } from 'drizzle-orm';
-import type { Guild } from 'discord.js';
+import { PermissionFlagsBits, type Guild } from 'discord.js';
 import { DatabaseService } from '../db/database.service';
-import { guildChannels, guildRoles, guilds } from '../db/schema';
+import { autoRoleEvents, guildChannels, guildRoles, guilds } from '../db/schema';
 import { DiscordApiError, DiscordChannel, DiscordGuild, DiscordRestService, DiscordRole } from '../discord/discord-rest.service';
 import {
   GUILD_CHANNELS_CHANGED_CHANNEL,
@@ -17,6 +17,8 @@ import {
 import { RedisService } from '../redis/redis.service';
 import { SettingsCache } from '../redis/settings-cache.service';
 import { StatsService } from '../admin/stats.service';
+import { APP_CONFIG, AppConfig } from '../core/config';
+import { compareAutoRoleHierarchy, type AutoRoleBotStatus } from '../shared/auto-roles';
 
 const CHANNELS_TTL_SECONDS = 60 * 60;
 const ROLES_TTL_SECONDS = 12 * 60;
@@ -35,6 +37,9 @@ export interface CachedRole {
   name: string;
   color: number;
   position: number;
+  permissions: string;
+  managed: boolean;
+  tags: Record<string, unknown>;
 }
 
 export interface GuildSyncResult {
@@ -59,6 +64,7 @@ export class GuildSyncService {
   private readonly logger = new Logger(GuildSyncService.name);
 
   constructor(
+    @Inject(APP_CONFIG) private readonly config: AppConfig,
     private readonly database: DatabaseService,
     private readonly redis: RedisService,
     private readonly discord: DiscordRestService,
@@ -138,6 +144,7 @@ export class GuildSyncService {
   }
 
   async markLeft(guildId: string): Promise<void> {
+    await this.database.db.delete(autoRoleEvents).where(eq(autoRoleEvents.guildId, guildId));
     const updated = await this.database.db
       .update(guilds)
       .set({ installed: false, leftAt: new Date(), updatedAt: new Date() })
@@ -161,12 +168,51 @@ export class GuildSyncService {
     const cached = await this.redis.client.get(key);
     if (cached) return JSON.parse(cached) as CachedRole[];
     const rows = await this.database.db
-      .select({ id: guildRoles.id, name: guildRoles.name, color: guildRoles.color, position: guildRoles.position })
+      .select({
+        id: guildRoles.id,
+        name: guildRoles.name,
+        color: guildRoles.color,
+        position: guildRoles.position,
+        permissions: guildRoles.permissions,
+        managed: guildRoles.managed,
+        tags: guildRoles.tags,
+      })
       .from(guildRoles)
       .where(eq(guildRoles.guildId, guildId))
       .orderBy(guildRoles.position);
     await this.redis.client.set(key, JSON.stringify(rows), 'EX', ROLES_TTL_SECONDS);
     return rows;
+  }
+
+  async getBotStatus(guildId: string, roles?: CachedRole[]): Promise<AutoRoleBotStatus> {
+    const cached = await this.redis.client.get(`guild:${guildId}:bot-status`);
+    if (cached) {
+      try {
+        const status = JSON.parse(cached) as Partial<AutoRoleBotStatus>;
+        const hasRoleId = Object.prototype.hasOwnProperty.call(status, 'highestRoleId');
+        const validRoleId = status.highestRoleId === null
+          || (typeof status.highestRoleId === 'string' && /^\d{17,20}$/.test(status.highestRoleId));
+        if (
+          typeof status.highestPosition === 'number'
+          && typeof status.manageRoles === 'boolean'
+          && hasRoleId
+          && validRoleId
+        ) {
+          return {
+            highestPosition: status.highestPosition,
+            highestRoleId: typeof status.highestRoleId === 'string' ? status.highestRoleId : null,
+            manageRoles: status.manageRoles,
+          };
+        }
+      } catch {
+        // Refresh malformed or pre-hierarchy cache entries from Discord.
+      }
+    }
+
+    const roleSnapshot = roles ?? await this.getRoles(guildId);
+    const status = await this.fetchBotStatus(guildId, roleSnapshot);
+    await this.redis.client.set(`guild:${guildId}:bot-status`, JSON.stringify(status), 'EX', ROLES_TTL_SECONDS);
+    return status;
   }
 
   async syncGuild(guildId: string): Promise<GuildSyncResult> {
@@ -181,6 +227,12 @@ export class GuildSyncService {
     }
     const rawChannels = await this.withRateLimitBackoff(() => this.discord.getGuildChannels(guildId));
     const rawRoles = await this.withRateLimitBackoff(() => this.discord.getGuildRoles(guildId));
+    let botStatus: AutoRoleBotStatus | undefined;
+    try {
+      botStatus = await this.fetchBotStatus(guildId, rawRoles);
+    } catch {
+      botStatus = undefined;
+    }
     return this.syncSnapshot({
       id: guild.id,
       name: guild.name,
@@ -189,7 +241,7 @@ export class GuildSyncService {
       ownerId: guild.owner_id ?? null,
       memberCount: guild.approximate_member_count ?? 0,
       systemChannelId: guild.system_channel_id ?? null,
-    }, rawChannels, rawRoles);
+    }, rawChannels, rawRoles, botStatus);
   }
 
   async syncGuildFromGateway(guild: Guild): Promise<GuildSyncResult> {
@@ -206,7 +258,10 @@ export class GuildSyncService {
       color: role.color,
       position: role.position,
       permissions: role.permissions.bitfield.toString(),
+      managed: role.managed,
+      tags: role.tags ? { ...role.tags } : {},
     }));
+    const botStatus = this.getBotStatusFromGateway(guild);
     return this.syncSnapshot({
       id: guild.id,
       name: guild.name,
@@ -215,13 +270,57 @@ export class GuildSyncService {
       ownerId: guild.ownerId,
       memberCount: guild.memberCount,
       systemChannelId: guild.systemChannelId,
-    }, rawChannels, rawRoles);
+    }, rawChannels, rawRoles, botStatus);
+  }
+
+  async refreshBotStatusFromGateway(guild: Guild): Promise<void> {
+    const key = `guild:${guild.id}:bot-status`;
+    const botStatus = this.getBotStatusFromGateway(guild);
+    if (!botStatus) {
+      await this.redis.client.del(key);
+      return;
+    }
+    await this.redis.client.set(key, JSON.stringify(botStatus), 'EX', ROLES_TTL_SECONDS);
+  }
+
+  private getBotStatusFromGateway(guild: Guild): AutoRoleBotStatus | undefined {
+    const me = guild.members.me;
+    if (!me) return undefined;
+    return {
+      highestPosition: me.roles.highest.position,
+      highestRoleId: me.roles.highest.id,
+      manageRoles: me.permissions.has(PermissionFlagsBits.ManageRoles)
+        || me.permissions.has(PermissionFlagsBits.Administrator),
+    };
+  }
+
+  private async fetchBotStatus(guildId: string, roles: DiscordRole[]): Promise<AutoRoleBotStatus> {
+    const member = await this.discord.getGuildMember(guildId, this.config.discordClientId);
+    const botRoles = roles.filter((role) => member.roles.includes(role.id));
+    const highestBotRole = botRoles.reduce<DiscordRole | undefined>(
+      (highest, role) => !highest || compareAutoRoleHierarchy(role, highest) > 0 ? role : highest,
+      undefined,
+    );
+    return {
+      highestPosition: highestBotRole?.position ?? 0,
+      highestRoleId: highestBotRole?.id ?? null,
+      manageRoles: botRoles.some((role) => {
+        if (!role.permissions) return false;
+        try {
+          return (BigInt(role.permissions) & PermissionFlagsBits.ManageRoles) !== 0n
+            || (BigInt(role.permissions) & PermissionFlagsBits.Administrator) !== 0n;
+        } catch {
+          return false;
+        }
+      }),
+    };
   }
 
   private async syncSnapshot(
     guild: GuildSnapshot,
     rawChannels: DiscordChannel[],
     rawRoles: DiscordRole[],
+    botStatus?: AutoRoleBotStatus,
   ): Promise<GuildSyncResult> {
     const categories = new Map(rawChannels.filter((channel) => channel.type === 4).map((channel) => [channel.id, channel.name]));
     const channels = rawChannels
@@ -233,6 +332,9 @@ export class GuildSyncService {
       name: role.name,
       color: role.color,
       position: role.position,
+      permissions: role.permissions ?? '0',
+      managed: role.managed === true,
+      tags: role.tags ?? {},
     }));
     const lastSyncedAt = new Date();
 
@@ -290,13 +392,29 @@ export class GuildSyncService {
           .values(roles.map((role) => ({ guildId: guild.id, ...role })))
           .onConflictDoUpdate({
             target: [guildRoles.guildId, guildRoles.id],
-            set: { name: sql`excluded.name`, color: sql`excluded.color`, position: sql`excluded.position` },
+            set: {
+              name: sql`excluded.name`,
+              color: sql`excluded.color`,
+              position: sql`excluded.position`,
+              permissions: sql`excluded.permissions`,
+              managed: sql`excluded.managed`,
+              tags: sql`excluded.tags`,
+            },
           });
         await tx.delete(guildRoles).where(and(eq(guildRoles.guildId, guild.id), notInArray(guildRoles.id, roles.map((role) => role.id))));
       } else {
         await tx.delete(guildRoles).where(eq(guildRoles.guildId, guild.id));
       }
     });
+
+    if (botStatus) {
+      await this.redis.client.set(
+        `guild:${guild.id}:bot-status`,
+        JSON.stringify(botStatus),
+        'EX',
+        ROLES_TTL_SECONDS,
+      );
+    }
 
     const result: GuildSyncResult = {
       guild: {
@@ -356,7 +474,8 @@ export class GuildSyncService {
 
   async upsertRole(
     guildId: string,
-    role: Pick<CachedRole, 'id' | 'name' | 'color'> & Partial<Pick<CachedRole, 'position'>>,
+    role: Pick<CachedRole, 'id' | 'name' | 'color'> &
+      Partial<Pick<CachedRole, 'position' | 'permissions' | 'managed' | 'tags'>>,
   ): Promise<void> {
     await this.database.db
       .insert(guildRoles)
@@ -366,10 +485,20 @@ export class GuildSyncService {
         name: role.name,
         color: role.color,
         position: Number.isFinite(role.position) ? role.position! : 0,
+        permissions: role.permissions ?? '0',
+        managed: role.managed === true,
+        tags: role.tags ?? {},
       })
       .onConflictDoUpdate({
         target: [guildRoles.guildId, guildRoles.id],
-        set: { name: sql`excluded.name`, color: sql`excluded.color`, position: sql`excluded.position` },
+        set: {
+          name: sql`excluded.name`,
+          color: sql`excluded.color`,
+          position: sql`excluded.position`,
+          permissions: sql`excluded.permissions`,
+          managed: sql`excluded.managed`,
+          tags: sql`excluded.tags`,
+        },
       });
     await this.invalidateRoles(guildId);
     await this.publishGuildEvent(guildId, 'roles', 'updated', { roleId: role.id });

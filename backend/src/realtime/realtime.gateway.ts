@@ -28,7 +28,7 @@ type ClientSocket = WebSocket & {
 interface GuildEvent {
   type: string;
   guildId: string;
-  kind: 'channels' | 'roles' | 'installed';
+  kind: 'channels' | 'roles' | 'installed' | 'settings';
   data: Record<string, string>;
   rev: number;
 }
@@ -253,7 +253,7 @@ function parseGuildEvent(raw: string, guildId: string): GuildEvent | null {
     if (!event || typeof event !== 'object') return null;
     const value = event as Record<string, unknown>;
     if (value.guildId !== guildId || typeof value.type !== 'string') return null;
-    if (value.kind !== 'channels' && value.kind !== 'roles' && value.kind !== 'installed') return null;
+    if (value.kind !== 'channels' && value.kind !== 'roles' && value.kind !== 'installed' && value.kind !== 'settings') return null;
     if (!value.data || typeof value.data !== 'object' || Array.isArray(value.data)) return null;
     const data = value.data as Record<string, unknown>;
     const idKey = value.kind === 'channels' ? 'channelId' : value.kind === 'roles' ? 'roleId' : null;

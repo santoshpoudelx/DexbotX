@@ -27,6 +27,7 @@ import { FeatureFlagsService } from '../core/feature-flags.service';
 import { OnboardingService } from '../discord/onboarding.service';
 import { ModerationService } from './moderation.service';
 import * as Sentry from '@sentry/node';
+import { computeAutoRoleDelay, getAutoRoleSafetyReason } from '../shared/auto-roles';
 
 @Injectable()
 export class BotService implements OnApplicationBootstrap, OnApplicationShutdown {
@@ -105,11 +106,41 @@ export class BotService implements OnApplicationBootstrap, OnApplicationShutdown
       if (channel.isDMBased()) return;
       return this.safe('channelDelete', () => this.sync.deleteChannel(channel.guildId, channel.id));
     });
-    c.on(Events.GuildRoleCreate, (role) => this.safe('roleCreate', () => this.sync.upsertRole(role.guild.id, role)));
-    c.on(Events.GuildRoleUpdate, (_old, role) => this.safe('roleUpdate', () => this.sync.upsertRole(role.guild.id, role)));
-    c.on(Events.GuildRoleDelete, (role) => this.safe('roleDelete', () => this.sync.deleteRole(role.guild.id, role.id)));
+    c.on(Events.GuildRoleCreate, (role) => this.safe('roleCreate', async () => {
+      await this.sync.upsertRole(role.guild.id, {
+        id: role.id,
+        name: role.name,
+        color: role.color,
+        position: role.position,
+        permissions: role.permissions.bitfield.toString(),
+        managed: role.managed,
+        tags: role.tags ? { ...role.tags } : {},
+      });
+      await this.sync.refreshBotStatusFromGateway(role.guild);
+    }));
+    c.on(Events.GuildRoleUpdate, (_old, role) => this.safe('roleUpdate', async () => {
+      await this.sync.upsertRole(role.guild.id, {
+        id: role.id,
+        name: role.name,
+        color: role.color,
+        position: role.position,
+        permissions: role.permissions.bitfield.toString(),
+        managed: role.managed,
+        tags: role.tags ? { ...role.tags } : {},
+      });
+      await this.sync.refreshBotStatusFromGateway(role.guild);
+    }));
+    c.on(Events.GuildRoleDelete, (role) => this.safe('roleDelete', async () => {
+      await this.sync.deleteRole(role.guild.id, role.id);
+      await this.sync.refreshBotStatusFromGateway(role.guild);
+    }));
     c.on(Events.GuildMemberAdd, (m) => this.safe('welcome', () => this.handleMember('welcome', m)));
-    c.on(Events.GuildMemberRemove, (m) => this.safe('goodbye', () => this.handleMember('goodbye', m)));
+    c.on(Events.GuildMemberUpdate, (oldMember, member) => this.safe('auto-role-update', () => this.handleAutoRoleMemberUpdate(oldMember, member)));
+    c.on(Events.GuildMemberAdd, (m) => this.safe('auto-role', () => this.handleAutoRoleMemberJoin(m)));
+    c.on(Events.GuildMemberRemove, (m) => this.safe('goodbye', async () => {
+      await this.redis.client.del(this.memberRolesKey(m.guild.id, m.id));
+      await this.handleMember('goodbye', m);
+    }));
     c.on(Events.Error, (err) => this.logger.error(`Client error: ${err.message}`));
     c.on(Events.ShardError, (err, id) => this.logger.error(`Shard ${id} error: ${err.message}`));
     c.on(Events.ShardDisconnect, (_e, id) => this.logger.warn(`Shard ${id} disconnected`));
@@ -254,6 +285,119 @@ export class BotService implements OnApplicationBootstrap, OnApplicationShutdown
       },
     });
   }
+
+  private async handleAutoRoleMemberJoin(member: GuildMember | PartialGuildMember): Promise<void> {
+    await this.cacheMemberRoleIds(member);
+    const config = (await this.settings.get(member.guild.id)).autoRoles;
+    if (!config.enabled || (member.user.bot && config.skipBots)) return;
+    if (config.waitForScreening && member.pending) return;
+    await this.enqueueAutoRole(member, member.joinedTimestamp ?? Date.now());
+  }
+
+  private async handleAutoRoleMemberUpdate(oldMember: GuildMember | PartialGuildMember, member: GuildMember | PartialGuildMember): Promise<void> {
+    await this.cacheMemberRoleIds(member);
+    const config = (await this.settings.get(member.guild.id)).autoRoles;
+    if (!config.enabled || (member.user.bot && config.skipBots) || !config.waitForScreening) return;
+    if (oldMember.pending === true && member.pending === false) {
+      await this.enqueueAutoRole(member, member.joinedTimestamp ?? Date.now());
+    }
+  }
+
+  private async enqueueAutoRole(member: GuildMember | PartialGuildMember, joinTimestamp: number): Promise<void> {
+    const guildId = member.guild.id;
+    const config = (await this.settings.get(guildId)).autoRoles;
+    if (!config.enabled || (member.user.bot && config.skipBots) || (config.waitForScreening && member.pending)) return;
+    const roleId = config.roleIds[0];
+    if (!roleId) return;
+    const roles = await this.sync.getRoles(guildId);
+    const role = roles.find((item) => item.id === roleId);
+    if (!role) return;
+    const botStatus = await this.sync.getBotStatus(guildId, roles);
+    if (getAutoRoleSafetyReason(guildId, role, botStatus)) return;
+
+    const dedupeKey = `guild:${guildId}:autorole:queued:${member.id}:${joinTimestamp}`;
+    if (await this.redis.client.set(dedupeKey, '1', 'EX', 30 * 60, 'NX') !== 'OK') return;
+
+    try {
+      const joinsLastMinute = await this.incrementAutoRoleJoinCounter(guildId);
+
+      const queueWaitingKey = `guild:${guildId}:queue-waiting`;
+      const cachedQueueWaiting = await this.redis.client.get(queueWaitingKey);
+      let queueWaiting = cachedQueueWaiting === null ? Number.NaN : Number(cachedQueueWaiting);
+      if (!Number.isFinite(queueWaiting)) {
+        const queueCounts = await this.queue.queue.getJobCounts('waiting');
+        queueWaiting = queueCounts.waiting ?? 0;
+        await this.redis.client.set(queueWaitingKey, String(queueWaiting), 'EX', 5);
+      }
+
+      const blockedUntil = Number(await this.redis.client.get('discord:blocked_until') ?? 0);
+      const discordBlockedSeconds = Math.max(0, Math.ceil((blockedUntil - Date.now()) / 1000));
+      const nextFreeSlotSeconds = config.delayMode === 'smart'
+        ? await this.reserveAutoRoleSlot(guildId)
+        : 0;
+      const delaySeconds = computeAutoRoleDelay({
+        mode: config.delayMode,
+        minDelaySeconds: config.minDelaySeconds,
+        fixedDelaySeconds: config.fixedDelaySeconds,
+        joinsLastMinute,
+        queueWaiting,
+        discordBlockedSeconds,
+        nextFreeSlotSeconds,
+      });
+      await this.queue.enqueueAutoRole({
+        kind: 'auto-role',
+        guildId,
+        userId: member.id,
+        username: member.user.username,
+        joinTimestamp,
+        pending: member.pending ?? false,
+        memberRoleIds: member instanceof GuildMember ? [...member.roles.cache.keys()] : [],
+      }, delaySeconds);
+    } catch (error) {
+      await this.redis.client.del(dedupeKey);
+      throw error;
+    }
+  }
+
+  private async cacheMemberRoleIds(member: GuildMember | PartialGuildMember): Promise<void> {
+    if (!(member instanceof GuildMember)) return;
+    await this.redis.client.set(
+      this.memberRolesKey(member.guild.id, member.id),
+      JSON.stringify([...member.roles.cache.keys()]),
+      'EX',
+      30 * 60,
+    );
+  }
+
+  private memberRolesKey(guildId: string, userId: string): string {
+    return `guild:${guildId}:member:${userId}:roles`;
+  }
+
+  private async incrementAutoRoleJoinCounter(guildId: string): Promise<number> {
+    return Number(await this.redis.client.eval(
+      "local ttl=redis.call('TTL', KEYS[1]); local count=redis.call('INCR', KEYS[1]); if ttl < 0 then redis.call('EXPIRE', KEYS[1], ARGV[1]); end; return count",
+      1,
+      `guild:${guildId}:joins:60`,
+      '60',
+    ));
+  }
+
+  private async reserveAutoRoleSlot(guildId: string): Promise<number> {
+    const result = await this.redis.client.eval(
+      `local key=KEYS[1]; local now=tonumber(ARGV[1]); local interval=tonumber(ARGV[2]); ` +
+      `local previous=tonumber(redis.call('get', key)) or (now-interval); ` +
+      `local reserved=math.max(now, previous+interval); ` +
+      `local ttl=math.max(60000, reserved-now+60000); ` +
+      `redis.call('set', key, reserved, 'PX', ttl); ` +
+      `return math.max(0, reserved-now)`,
+      1,
+      `guild:${guildId}:autorole-slot`,
+      String(Date.now()),
+      '2000',
+    );
+    return Math.ceil(Number(result) / 1000);
+  }
+
 
   async onGuildCreate(guild: Guild): Promise<void> {
     const inserted = await this.sync.upsert(guild);

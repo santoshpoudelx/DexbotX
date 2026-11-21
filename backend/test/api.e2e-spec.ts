@@ -10,9 +10,9 @@ import {
 } from 'discord.js';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
-import { eq, sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { ChildProcess, execFileSync, spawn } from 'node:child_process';
-import { chownSync, mkdtempSync, rmSync } from 'node:fs';
+import { chownSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import postgres from 'postgres';
@@ -31,6 +31,7 @@ import { APP_CONFIG } from '../src/core/config';
 import { SessionService } from '../src/auth/session.service';
 import { WelcomeService } from '../src/welcome/welcome.service';
 import { DiscordRestService } from '../src/discord/discord-rest.service';
+import { ChannelAccessService } from '../src/discord/channel-access.service';
 import { MetricsService } from '../src/metrics/metrics.service';
 import { GuildsService } from '../src/guilds/guilds.service';
 import { messageConfigSchema } from '../src/shared/message-config';
@@ -38,8 +39,10 @@ import { sha256Hex } from '../src/shared/crypto';
 import { GuildSyncService } from '../src/bot/guild-sync.service';
 import { findOnboardingChannel } from '../src/bot/bot.service';
 import { OnboardingService } from '../src/discord/onboarding.service';
+import { defaultAutoRoleConfig } from '../src/shared/auto-roles';
 import { ModerationService } from '../src/bot/moderation.service';
 import { HealthController } from '../src/health/health.controller';
+import { guildRolesCacheKey } from '../src/guilds/guild-events';
 
 const PG_PORT = 54329;
 const REDIS_PORT = 63799;
@@ -74,7 +77,14 @@ let failRoleLookup = false;
 let messagePostFailures = 0;
 let failAdminMessageStatus: number | null = null;
 let rateLimitGuildChannels = false;
-let stubGuildRoles: Array<{ id: string; name: string; color: number; position: number; hoist?: boolean }> = [];
+let stubGuildRoles: Array<{
+  id: string;
+  name: string;
+  color: number;
+  position: number;
+  hoist?: boolean;
+  permissions?: string;
+}> = [];
 let stubBotRoleIds: string[] = [];
 
 type GuildSummary = { id: string; inviteUrl: string | null; botInstalled: boolean };
@@ -443,6 +453,46 @@ describe('DexBotX API', () => {
   const http = () => request(app.getHttpServer());
   const authed = () => ({ Cookie: sessionCookie, Origin: WEB });
 
+  it('completes a partially applied Auto Roles migration when its settings column already exists', async () => {
+    const databaseUrl = process.env.DATABASE_URL;
+    if (!databaseUrl) throw new Error('Expected the E2E database URL to be configured');
+    const migration = readFileSync(join(__dirname, '..', 'drizzle', '0005_auto_roles.sql'), 'utf8');
+    const client = postgres(databaseUrl, { max: 1, ssl: false, prepare: false });
+
+    try {
+      await client.unsafe('DROP TABLE IF EXISTS "auto_role_events"');
+      await client.unsafe('ALTER TABLE "guild_roles" DROP COLUMN IF EXISTS "permissions", DROP COLUMN IF EXISTS "managed", DROP COLUMN IF EXISTS "tags"');
+      for (const statement of migration.split('--> statement-breakpoint')) {
+        if (statement.trim()) await client.unsafe(statement);
+      }
+      const defaultsMigration = readFileSync(join(__dirname, '..', 'drizzle', '0006_auto_roles_defaults.sql'), 'utf8');
+      await client.unsafe(defaultsMigration);
+
+      const columns = await client<{ column_name: string }[]>`
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'guild_roles'
+          AND column_name IN ('permissions', 'managed', 'tags')
+      `;
+      expect(columns.map((column) => column.column_name).sort()).toEqual(['managed', 'permissions', 'tags']);
+      const defaults = await client<{ column_default: string }[]>`
+        SELECT column_default
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'guild_settings'
+          AND column_name = 'auto_roles'
+      `;
+      expect(defaults[0]?.column_default).toContain('Congratulations {user} You unlocked new {role} role.');
+      expect(defaults[0]?.column_default).toContain('"title": "Role assigned {role}"');
+      expect(defaults[0]?.column_default).toContain('"description": "Enjoy your new permissions and privileges! ✨"');
+      expect(defaults[0]?.column_default).toContain('"color": "#7c6cff"');
+      expect(defaults[0]?.column_default).toContain('"footer": "Enjoy your new role! 💜"');
+    } finally {
+      await client.end({ timeout: 5 });
+    }
+  });
+
   it('reports public status with the exact body shape and security headers', async () => {
     await setHealthHeartbeats();
     resetHealthCache();
@@ -726,19 +776,60 @@ describe('DexBotX API', () => {
     await redis.del('stat:discord-rest-calls');
     discordCalls.length = 0;
     await redis.del(`ug:${USER_ID}`, `guild:${G1}:channels`);
+    const botStatusKey = `guild:${G1}:bot-status`;
+    const previousBotStatus = await redis.get(botStatusKey);
+    await redis.set(botStatusKey, JSON.stringify({
+      highestPosition: 10,
+      highestRoleId: null,
+      manageRoles: true,
+    }), 'EX', 12 * 60);
 
-    for (let i = 0; i < 10; i++) {
-      await http().get('/auth/me').set(requestHeaders).expect(200);
-      await http().get(`/guilds/${G1}`).set(requestHeaders).expect(200);
-      await http().get(`/guilds/${G1}/channels`).set(requestHeaders).expect(200);
-      await http().get('/presets').expect(200);
+    try {
+      for (let i = 0; i < 10; i++) {
+        await http().get('/auth/me').set(requestHeaders).expect(200);
+        await http().get(`/guilds/${G1}`).set(requestHeaders).expect(200);
+        await http().get(`/guilds/${G1}/channels`).set(requestHeaders).expect(200);
+        await http().get('/presets').expect(200);
+      }
+
+      expect(discordCalls.filter((call) => call.path.startsWith('/users/@me/guilds'))).toHaveLength(1);
+      expect(discordCalls).toHaveLength(1);
+      expect(await redis.ttl(`guild:${G1}:channels`)).toBeGreaterThan(3500);
+      const metrics = await app.get(MetricsService).render();
+      expect(metrics).toContain('dexbotx_discord_rest_calls{method="GET",route="/users/@me/guilds"} 1');
+    } finally {
+      if (previousBotStatus === null) await redis.del(botStatusKey);
+      else await redis.set(botStatusKey, previousBotStatus);
     }
+  });
 
-    expect(discordCalls.filter((call) => call.path.startsWith('/users/@me/guilds'))).toHaveLength(1);
-    expect(discordCalls).toHaveLength(1);
-    expect(await redis.ttl(`guild:${G1}:channels`)).toBeGreaterThan(3500);
-    const metrics = await app.get(MetricsService).render();
-    expect(metrics).toContain('dexbotx_discord_rest_calls{method="GET",route="/users/@me/guilds"} 1');
+  it('checks Embed Links when Auto Roles announcements use embeds', async () => {
+    const discord = app.get(DiscordRestService);
+    const previousRoles = stubGuildRoles;
+    const previousBotRoleIds = stubBotRoleIds;
+    try {
+      stubGuildRoles = [{
+        id: G1,
+        name: '@everyone',
+        color: 0,
+        position: 0,
+        permissions: (PermissionFlagsBits.ViewChannel | PermissionFlagsBits.SendMessages).toString(),
+      }];
+      stubBotRoleIds = [];
+
+      await expect(discord.canBotPost(C1)).resolves.toBe(true);
+      await expect(discord.canBotPost(C1, true)).resolves.toBe(false);
+
+      stubGuildRoles[0].permissions = (
+        PermissionFlagsBits.ViewChannel
+        | PermissionFlagsBits.SendMessages
+        | PermissionFlagsBits.EmbedLinks
+      ).toString();
+      await expect(discord.canBotPost(C1, true)).resolves.toBe(true);
+    } finally {
+      stubGuildRoles = previousRoles;
+      stubBotRoleIds = previousBotRoleIds;
+    }
   });
 
   it('creates a short-lived authenticated one-use WebSocket ticket', async () => {
@@ -824,6 +915,7 @@ describe('DexBotX API', () => {
         guildId: G1,
         welcome: config,
         goodbye: config,
+        autoRoles: defaultAutoRoleConfig(),
         updatedBy: ADMIN_ID,
       }).onConflictDoUpdate({
         target: guildSettings.guildId,
@@ -1000,6 +1092,7 @@ describe('DexBotX API', () => {
       guildId: G1,
       welcome: asciiConfig,
       goodbye: asciiConfig,
+      autoRoles: defaultAutoRoleConfig(),
       updatedBy: ADMIN_ID,
     }).onConflictDoUpdate({
       target: guildSettings.guildId,
@@ -1152,10 +1245,116 @@ describe('DexBotX API', () => {
     const res = await http().get(`/guilds/${G1}`).set(authed()).expect(200);
     expect(res.body.guild).toMatchObject({ id: G1, name: 'Alpha Guild', memberCount: 120 });
     expect(res.body.settings.welcome.enabled).toBe(false);
+    expect(res.body.autoRoles.config).toEqual(defaultAutoRoleConfig());
+    expect(res.body.autoRoles.roles).toEqual({ assignable: [], hidden: [expect.objectContaining({ name: 'member' })] });
     const ch = await http().get(`/guilds/${G1}/channels`).set(authed()).expect(200);
     const channels = ch.body.channels as ChannelSummary[];
     expect(channels.map((channel) => channel.name)).toEqual(['welcome', 'news']);
     expect(ch.body.channels[0].category).toBe('Info');
+  });
+
+  it('validates and saves Auto Roles settings and protects test/activity endpoints', async () => {
+    const config = defaultAutoRoleConfig();
+    config.announce.message = 'Welcome @everyone {user}';
+
+    await http().put(`/guilds/${G1}/auto-roles`).set(authed()).send({
+      ...config,
+      unexpected: true,
+    }).expect(400);
+    await http().put(`/guilds/${G1}/auto-roles`).set(authed()).send({
+      ...config,
+      announce: { ...config.announce, message: 'Hello {unknown}' },
+    }).expect(400);
+
+    const saved = await http().put(`/guilds/${G1}/auto-roles`).set(authed()).send(config).expect(200);
+    expect(saved.body.config.announce.message).toBe('Welcome @\u200beveryone {user}');
+    expect(saved.body.checks).toEqual({
+      hasManageRoles: false,
+      roleBelowBot: false,
+      canSendInChannel: false,
+    });
+
+    await http().post(`/guilds/${G1}/auto-roles/test`).set(authed()).expect(400);
+    await http().get(`/guilds/${G1}/auto-roles/activity`).set(authed()).expect(200, { activity: [] });
+    await http().get(`/guilds/${G2}/auto-roles/activity`).set(authed()).expect(403);
+
+    const audit = await app.get(DatabaseService).db.select().from(auditLogs).where(eq(auditLogs.guildId, G1));
+    expect(audit).toEqual(expect.arrayContaining([
+      expect.objectContaining({ userId: USER_ID, action: 'auto_roles.update' }),
+    ]));
+
+    const redis = app.get(RedisService).client;
+    const botStatusKey = `guild:${G1}:bot-status`;
+    const testRateLimitKey = `rl:auto-roles-test:${USER_ID}`;
+    const rolesKey = guildRolesCacheKey(G1);
+    const previousBotStatus = await redis.get(botStatusKey);
+    const previousLimitCount = await redis.get(testRateLimitKey);
+    const previousLimitTtl = await redis.ttl(testRateLimitKey);
+    const testConfig = defaultAutoRoleConfig();
+    testConfig.enabled = true;
+    testConfig.roleIds = ['555555555555555554'];
+    testConfig.announce = {
+      ...testConfig.announce,
+      enabled: true,
+      channelId: C1,
+      message: 'Welcome {user} to {server} as {role}',
+    };
+    const firstTestMessage = onboardingMessages.length;
+
+    try {
+      await redis.del(testRateLimitKey, rolesKey);
+      await redis.set(botStatusKey, JSON.stringify({
+        highestPosition: 10,
+        highestRoleId: '999999999999999999',
+        manageRoles: true,
+      }));
+      await http().put(`/guilds/${G1}/auto-roles`).set(authed()).send(testConfig).expect(200);
+      for (let attempt = 0; attempt < 3; attempt++) {
+        await http().post(`/guilds/${G1}/auto-roles/test`).set(authed()).expect(200, { channelId: C1 });
+      }
+
+      const testMessages = onboardingMessages.slice(firstTestMessage);
+      expect(testMessages).toHaveLength(3);
+      expect(testMessages[0].channelId).toBe(C1);
+      expect(testMessages[0].body).toMatchObject({
+        content: `Welcome <@${USER_ID}> to Alpha Guild as member`,
+        embeds: [],
+        allowed_mentions: { parse: [], users: [USER_ID] },
+      });
+      await http().post(`/guilds/${G1}/auto-roles/test`).set(authed()).expect(429);
+    } finally {
+      await app.get(DatabaseService).db.update(guildSettings)
+        .set({ autoRoles: saved.body.config })
+        .where(eq(guildSettings.guildId, G1));
+      await app.get(SettingsCache).invalidate(G1);
+      await redis.del(rolesKey);
+      if (previousBotStatus === null) await redis.del(botStatusKey);
+      else await redis.set(botStatusKey, previousBotStatus);
+      if (previousLimitCount === null) await redis.del(testRateLimitKey);
+      else if (previousLimitTtl > 0) await redis.set(testRateLimitKey, previousLimitCount, 'EX', previousLimitTtl);
+      else await redis.set(testRateLimitKey, previousLimitCount);
+    }
+  });
+
+  it('returns from Auto Roles save before Discord channel permission repair finishes', async () => {
+    const config = defaultAutoRoleConfig();
+    config.announce.enabled = true;
+    config.announce.channelId = C1;
+    const repair = jest.spyOn(app.get(ChannelAccessService), 'ensureChannelAccess')
+      .mockImplementation(() => new Promise(() => {}));
+
+    try {
+      const saved = await http().put(`/guilds/${G1}/auto-roles`)
+        .timeout({ response: 2000 })
+        .set(authed())
+        .send(config)
+        .expect(200);
+
+      expect(saved.body.config.announce.channelId).toBe(C1);
+      expect(repair).toHaveBeenCalledWith(G1, C1);
+    } finally {
+      repair.mockRestore();
+    }
   });
 
   const validWelcome = (over: object = {}) => ({
@@ -1195,7 +1394,10 @@ describe('DexBotX API', () => {
     expect(detail.body.imageKeys.welcome).toBe(res.body.imageKey);
 
     const db = app.get(DatabaseService).db;
-    const audit = await db.select().from(auditLogs).where(eq(auditLogs.guildId, G1));
+    const audit = await db.select().from(auditLogs).where(and(
+      eq(auditLogs.guildId, G1),
+      eq(auditLogs.action, 'welcome.update'),
+    ));
     expect(audit).toHaveLength(1);
     expect(audit[0]).toMatchObject({ userId: USER_ID, action: 'welcome.update' });
   });
@@ -1648,6 +1850,40 @@ describe('Guild onboarding', () => {
 });
 
 describe('Bot → queue → worker', () => {
+  it('uses atomic join counters and expiring two-second guild slots', async () => {
+    const guildId = '444444444444444444';
+    const redis = botModule.get(RedisService).client;
+    const scheduling = botModule.get(BotService) as unknown as {
+      incrementAutoRoleJoinCounter(guildId: string): Promise<number>;
+      reserveAutoRoleSlot(guildId: string): Promise<number>;
+    };
+    const counterKey = `guild:${guildId}:joins:60`;
+    const slotKey = `guild:${guildId}:autorole-slot`;
+    await redis.del(counterKey, slotKey);
+
+    try {
+      expect(await scheduling.incrementAutoRoleJoinCounter(guildId)).toBe(1);
+      expect(await scheduling.incrementAutoRoleJoinCounter(guildId)).toBe(2);
+      const counterTtl = await redis.pttl(counterKey);
+      expect(counterTtl).toBeGreaterThan(0);
+      expect(counterTtl).toBeLessThanOrEqual(60_000);
+
+      await redis.set(counterKey, '41');
+      expect(await scheduling.incrementAutoRoleJoinCounter(guildId)).toBe(42);
+      expect(await redis.pttl(counterKey)).toBeGreaterThan(0);
+
+      expect(await scheduling.reserveAutoRoleSlot(guildId)).toBe(0);
+      const nextSlotDelay = await scheduling.reserveAutoRoleSlot(guildId);
+      expect(nextSlotDelay).toBeGreaterThanOrEqual(1);
+      expect(nextSlotDelay).toBeLessThanOrEqual(2);
+      const slotTtl = await redis.pttl(slotKey);
+      expect(slotTtl).toBeGreaterThan(60_000);
+      expect(slotTtl).toBeLessThanOrEqual(62_000);
+    } finally {
+      await redis.del(counterKey, slotKey);
+    }
+  });
+
   function fakeMember(opts: { hasPerms?: boolean; hasManageRoles?: boolean; bot?: boolean; channelInCache?: boolean; userId?: string } = {}) {
     const channel = {
       id: C1,
@@ -1723,9 +1959,9 @@ describe('Bot → queue → worker', () => {
     const goodbye = messageConfigSchema.parse({ ...current.goodbye, enabled: true, channelId: C1 });
     const db = app.get(DatabaseService).db;
     try {
-      await db.insert(guildSettings).values({ guildId: G1, welcome, goodbye }).onConflictDoUpdate({
+      await db.insert(guildSettings).values({ guildId: G1, welcome, goodbye, autoRoles: current.autoRoles }).onConflictDoUpdate({
         target: guildSettings.guildId,
-        set: { welcome, goodbye },
+        set: { welcome, goodbye, autoRoles: current.autoRoles },
       });
       await settings.invalidate(G1);
 
@@ -1734,16 +1970,16 @@ describe('Bot → queue → worker', () => {
       }
 
       const jobs = await queue().getJobs(['waiting']);
-      const botJobs = jobs.filter((job) => job.data.user.id === '888222888222888222' || job.data.user.id === '888444888444888444');
+      const botJobs = jobs.filter((job) => 'user' in job.data && (job.data.user.id === '888222888222888222' || job.data.user.id === '888444888444888444'));
       expect(botJobs.map((job) => job.data.kind).sort()).toEqual(['goodbye', 'welcome']);
     } finally {
       const botJobs = (await queue().getJobs(['waiting'])).filter((job) =>
-        job.data.user.id === '888222888222888222' || job.data.user.id === '888444888444888444',
+        'user' in job.data && (job.data.user.id === '888222888222888222' || job.data.user.id === '888444888444888444'),
       );
       await Promise.all(botJobs.map((job) => job.remove()));
-      await db.insert(guildSettings).values({ guildId: G1, welcome: current.welcome, goodbye: current.goodbye }).onConflictDoUpdate({
+      await db.insert(guildSettings).values({ guildId: G1, welcome: current.welcome, goodbye: current.goodbye, autoRoles: current.autoRoles }).onConflictDoUpdate({
         target: guildSettings.guildId,
-        set: { welcome: current.welcome, goodbye: current.goodbye },
+        set: { welcome: current.welcome, goodbye: current.goodbye, autoRoles: current.autoRoles },
       });
       await settings.invalidate(G1);
     }
@@ -1752,7 +1988,7 @@ describe('Bot → queue → worker', () => {
   it('queues an event with missing channel permissions when the bot can manage roles', async () => {
     await handle('welcome', fakeMember({ hasPerms: false, hasManageRoles: true, userId: '888111888111888111' }));
     const jobs = await queue().getJobs(['waiting']);
-    const job = jobs.find((queued) => queued.data.user.id === '888111888111888111');
+    const job = jobs.find((queued) => 'user' in queued.data && queued.data.user.id === '888111888111888111');
     expect(job).toBeTruthy();
     await job?.remove();
   });
@@ -1926,7 +2162,7 @@ describe('Bot → queue → worker', () => {
 
     const job = await waitFor(async () => {
       const completed = await queue().getJobs(['completed']);
-      return completed.find((queued) => queued.data.user.id === '888222888222888222');
+      return completed.find((queued) => 'user' in queued.data && queued.data.user.id === '888222888222888222');
     });
     expect(job.returnvalue).toBe('sent');
     expect(discordCalls.filter((call) => call.method === 'POST' && call.path === `/channels/${C1}/messages`)).toHaveLength(2);
@@ -1955,7 +2191,7 @@ describe('Bot → queue → worker', () => {
     await botModule.get(RedisService).client.del(`permfix:${G1}:${C1}`);
     failMessagePost = true;
     await handle('welcome', fakeMember({ userId: '888000888000888000' }));
-    const job = await waitFor(async () => (await queue().getJobs(['failed'])).find((j) => j.data.user.id === '888000888000888000'));
+    const job = await waitFor(async () => (await queue().getJobs(['failed'])).find((j) => 'user' in j.data && j.data.user.id === '888000888000888000'));
     failMessagePost = false;
     expect(job.attemptsMade).toBe(1); // unrecoverable: moved to failed immediately, no 5x retry storm
     expect(job.failedReason).toContain('Discord refused the post (403');

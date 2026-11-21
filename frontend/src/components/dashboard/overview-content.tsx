@@ -1,6 +1,6 @@
 'use client';
 
-import { Bell, CircleCheck, FileText, Music, ShieldCheck, UserPlus, LogOut } from 'lucide-react';
+import { Bell, CircleCheck, FileText, LogOut, Music, ShieldCheck, UserPlus, Users } from 'lucide-react';
 import { Card } from '@/components/ui/misc';
 import { useGetChannelsQuery, useGetGuildQuery } from '@/store/api';
 import { OverviewSkeleton } from './loading-skeleton';
@@ -21,6 +21,7 @@ export function OverviewContent({ guildId }: { guildId: string }) {
   };
   const welcome = data.settings.welcome;
   const goodbye = data.settings.goodbye;
+  const autoRoles = data.autoRoles.config;
 
   return (
     <>
@@ -28,6 +29,7 @@ export function OverviewContent({ guildId }: { guildId: string }) {
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
         <ModuleCard title="Welcome messages" description={channelName(welcome.channelId)} icon={UserPlus} status={<StatusPill on={welcome.enabled} />} href={`/dashboard/${guildId}/welcome`} actionLabel="Configure" />
         <ModuleCard title="Goodbye messages" description={channelName(goodbye.channelId)} icon={LogOut} status={<StatusPill on={goodbye.enabled} />} href={`/dashboard/${guildId}/goodbye`} actionLabel="Configure" />
+        <ModuleCard title="Auto Roles" description="Assign a role automatically when members join." icon={Users} status={<StatusPill on={autoRoles.enabled} />} href={`/dashboard/${guildId}/auto-roles`} actionLabel="Configure Auto Roles" />
         <Card className="flex min-h-52 flex-col p-5">
           <div className="flex items-start justify-between gap-3">
             <div className="grid size-10 place-items-center rounded-lg bg-muted text-success"><CircleCheck aria-hidden="true" className="size-5" /></div>

@@ -59,6 +59,9 @@ const withBundleAnalyzer = process.env.ANALYZE === 'true'
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  experimental: {
+    agentUpgrade: 'security',
+  },
   output: 'standalone',
   poweredByHeader: false,
   reactStrictMode: true,

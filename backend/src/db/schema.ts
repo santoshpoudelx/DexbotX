@@ -1,5 +1,8 @@
-import { bigserial, boolean, index, integer, jsonb, pgTable, primaryKey, text, timestamp } from 'drizzle-orm/pg-core';
+import { bigserial, boolean, check, index, integer, jsonb, pgTable, primaryKey, text, timestamp } from 'drizzle-orm/pg-core';
+import { sql } from 'drizzle-orm';
 import type { MessageConfig } from '../shared/message-config';
+import type { AutoRoleConfig } from '../shared/auto-roles';
+import { defaultAutoRoleConfig } from '../shared/auto-roles';
 
 /** Servers the bot is (or was) in. Written by the bot, read by the API. */
 export const guilds = pgTable('guilds', {
@@ -24,6 +27,7 @@ export const guildSettings = pgTable('guild_settings', {
     .references(() => guilds.id),
   welcome: jsonb('welcome').$type<MessageConfig>().notNull(),
   goodbye: jsonb('goodbye').$type<MessageConfig>().notNull(),
+  autoRoles: jsonb('auto_roles').$type<AutoRoleConfig>().notNull().default(defaultAutoRoleConfig()),
   updatedBy: text('updated_by'),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 }).enableRLS();
@@ -49,6 +53,9 @@ export const guildRoles = pgTable(
     name: text('name').notNull(),
     color: integer('color').notNull().default(0),
     position: integer('position').notNull(),
+    permissions: text('permissions').notNull().default('0'),
+    managed: boolean('managed').notNull().default(false),
+    tags: jsonb('tags').$type<Record<string, unknown>>().notNull().default({}),
   },
   (t) => [primaryKey({ columns: [t.guildId, t.id] }), index('guild_roles_guild_position_idx').on(t.guildId, t.position)],
 ).enableRLS();
@@ -110,6 +117,22 @@ export const modActions = pgTable(
   (t) => [
     index('mod_actions_guild_created_idx').on(t.guildId, t.createdAt),
     index('mod_actions_target_created_idx').on(t.targetId, t.createdAt),
+  ],
+).enableRLS();
+
+export const autoRoleEvents = pgTable(
+  'auto_role_events',
+  {
+    id: bigserial('id', { mode: 'number' }).primaryKey(),
+    guildId: text('guild_id').notNull(),
+    userId: text('user_id').notNull(),
+    roleId: text('role_id').notNull(),
+    outcome: text('outcome').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('auto_role_events_guild_created_idx').on(t.guildId, t.createdAt),
+    check('auto_role_events_outcome_check', sql`${t.outcome} in ('assigned', 'skipped_left', 'skipped_has_role', 'skipped_unsafe', 'failed')`),
   ],
 ).enableRLS();
 

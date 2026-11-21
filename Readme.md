@@ -1,5 +1,7 @@
 # DexBotX
 
+AI agents: read .github/skills/dexbotx-project-guide/SKILL.md first and keep it updated.
+
 DexBotX is an all-in-one Discord community bot built to help servers stay safer, more welcoming, and easier to manage. It brings anti-spam, social notifications, AI chat, auto roles, and personalized welcome and goodbye messages together in a fast, reliable, free, open-source bot with an easy web dashboard. Automatic moderation is coming soon.
 
 ## Features

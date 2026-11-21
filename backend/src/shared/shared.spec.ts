@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { decrypt, encrypt } from './crypto';
 import { userAvatarUrl } from './discord-cdn';
-import { defaultMessageConfig, messageConfigSchema } from './message-config';
+import { defaultMessageConfig, messageConfigSchema, normalizeMessageConfig } from './message-config';
 import { canManageGuild } from './permissions';
 import { applyPlaceholders, ordinal } from './placeholders';
 import { PRESETS } from './presets';
@@ -37,6 +37,13 @@ describe('message config schema', () => {
   it('accepts both defaults', () => {
     expect(messageConfigSchema.safeParse(defaultMessageConfig('welcome')).success).toBe(true);
     expect(messageConfigSchema.safeParse(defaultMessageConfig('goodbye')).success).toBe(true);
+  });
+
+  it('uses the updated Welcome and Goodbye embed footers in defaults and fallbacks', () => {
+    expect(defaultMessageConfig('welcome').embed.footer).toBe('Don\'t forget to check out the server channels and follow the rules.');
+    expect(defaultMessageConfig('goodbye').embed.footer).toBe('Bye Bye 👋');
+    expect(normalizeMessageConfig('welcome', null).embed.footer).toBe(defaultMessageConfig('welcome').embed.footer);
+    expect(normalizeMessageConfig('goodbye', null).embed.footer).toBe(defaultMessageConfig('goodbye').embed.footer);
   });
 
   it('accepts every preset once a channel is set', () => {

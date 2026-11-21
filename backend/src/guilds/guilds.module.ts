@@ -9,11 +9,12 @@ import { GuildEventsService } from './guild-events.service';
 import { GuildsController } from './guilds.controller';
 import { InviteController } from './invite.controller';
 import { GuildsService } from './guilds.service';
+import { AutoRolesService } from './auto-roles.service';
 
 @Module({
   imports: [AuthModule, DiscordModule],
   controllers: [GuildsController, GuildEventsController, InviteController, BotAddedController],
-  providers: [GuildsService, GuildSyncService, GuildAccessGuard, GuildEventsService],
-  exports: [GuildsService, GuildAccessGuard],
+  providers: [GuildsService, GuildSyncService, GuildAccessGuard, GuildEventsService, AutoRolesService],
+  exports: [GuildsService, GuildSyncService, GuildAccessGuard, AutoRolesService],
 })
 export class GuildsModule {}

@@ -5,9 +5,14 @@ import { DiscordRestService } from '../discord/discord-rest.service';
 import { RedisService } from '../redis/redis.service';
 import { SettingsCache } from '../redis/settings-cache.service';
 import { GUILD_CHANNELS_CHANGED_CHANNEL, GUILD_SYNCED_CHANNEL, guildChannelsCacheKey } from '../guilds/guild-events';
+import { getAutoRoleSafetyReason } from '../shared/auto-roles';
 import { GuildSyncService } from './guild-sync.service';
 
-function makeService(inserted = true) {
+function makeService(
+  inserted = true,
+  roleFixtures = [{ id: 'role-live', name: 'member', color: 0, position: 1 }],
+  botRoleIds: string[] = [],
+) {
   const deletes: Array<{ table: unknown; condition: unknown }> = [];
   const inserts: Array<{ table: unknown; values: unknown }> = [];
   const makeInsert = (table: unknown) => ({
@@ -69,6 +74,7 @@ function makeService(inserted = true) {
     },
   } as unknown as DatabaseService;
   const redisClient = {
+    get: jest.fn(async (_key: string) => null as string | null),
     set: jest.fn(async (..._args: unknown[]) => 'OK' as string | null),
     del: jest.fn(async (..._args: unknown[]) => 1),
     publish: jest.fn(async (..._args: unknown[]) => 1),
@@ -86,13 +92,12 @@ function makeService(inserted = true) {
     getGuildChannels: jest.fn(async () => [
       { id: 'channel-live', name: 'general', type: 0, position: 1, parent_id: null },
     ]),
-    getGuildRoles: jest.fn(async () => [
-      { id: 'role-live', name: 'member', color: 0, position: 1 },
-    ]),
+    getGuildRoles: jest.fn(async () => roleFixtures),
+    getGuildMember: jest.fn(async () => ({ roles: botRoleIds })),
   } as unknown as DiscordRestService;
   const settings = { get: jest.fn(async () => ({ welcome: {}, goodbye: {} })) } as unknown as SettingsCache;
   const stats = { incr: jest.fn(async (_name: string) => undefined) };
-  const service = new GuildSyncService(database, redis, discord, settings, stats as never);
+  const service = new GuildSyncService({ discordClientId: '123456789012345678' } as never, database, redis, discord, settings, stats as never);
   return { service, database, redisClient, discord, stats, deletes, inserts };
 }
 
@@ -103,7 +108,10 @@ describe('GuildSyncService', () => {
     const result = await service.syncGuild('guild-123');
 
     expect(result.channels).toEqual([{ id: 'channel-live', name: 'general', category: null }]);
-    expect(result.roles).toEqual([{ id: 'role-live', name: 'member', color: 0, position: 1 }]);
+    expect(result.roles).toEqual([{
+      id: 'role-live', name: 'member', color: 0, position: 1,
+      permissions: '0', managed: false, tags: {},
+    }]);
     expect(discord.getGuildAsBot).toHaveBeenCalledWith('guild-123');
     expect(discord.getGuildChannels).toHaveBeenCalledWith('guild-123');
     expect(discord.getGuildRoles).toHaveBeenCalledWith('guild-123');
@@ -111,6 +119,51 @@ describe('GuildSyncService', () => {
     expect(deletes.map(({ table }) => table)).toEqual(expect.arrayContaining([guildChannels, guildRoles]));
     expect(redisClient.set).toHaveBeenCalledWith(guildChannelsCacheKey('guild-123'), JSON.stringify(result.channels), 'EX', 3600);
     expect(redisClient.publish).toHaveBeenCalledWith(GUILD_SYNCED_CHANNEL, 'guild-123');
+  });
+
+  it('stores the highest bot role using Discord tie-breaking for equal positions', async () => {
+    const botRoleId = '100000000000000001';
+    const lowerRoleId = '100000000000000002';
+    const { service, redisClient } = makeService(true, [
+      { id: lowerRoleId, name: 'bot role', color: 0, position: 3 },
+      { id: botRoleId, name: 'other bot role', color: 0, position: 3 },
+    ], [botRoleId, lowerRoleId]);
+
+    await service.syncGuild('guild-123');
+
+    expect(redisClient.set).toHaveBeenCalledWith(
+      'guild:guild-123:bot-status',
+      JSON.stringify({ highestPosition: 3, highestRoleId: botRoleId, manageRoles: false }),
+      'EX',
+      12 * 60,
+    );
+  });
+
+  it('refreshes legacy bot hierarchy cache entries that lack the highest role ID', async () => {
+    const botRoleId = '100000000000000001';
+    const memberRoleId = '100000000000000002';
+    const roles = [
+      { id: botRoleId, name: 'DexBotX', color: 0, position: 5, permissions: '268435456', managed: true, tags: {} },
+      { id: memberRoleId, name: 'Member', color: 0, position: 2, permissions: '0', managed: false, tags: {} },
+    ];
+    const { service, redisClient, discord } = makeService(true, roles, [botRoleId]);
+    redisClient.get.mockResolvedValueOnce(JSON.stringify({ highestPosition: 5, manageRoles: true }));
+
+    const status = await service.getBotStatus('guild-123', roles);
+    expect(status).toEqual({
+      highestPosition: 5,
+      highestRoleId: botRoleId,
+      manageRoles: true,
+    });
+    expect(getAutoRoleSafetyReason('guild-123', roles[1], status)).toBeNull();
+
+    expect(discord.getGuildMember).toHaveBeenCalledWith('guild-123', '123456789012345678');
+    expect(redisClient.set).toHaveBeenCalledWith(
+      'guild:guild-123:bot-status',
+      JSON.stringify({ highestPosition: 5, highestRoleId: botRoleId, manageRoles: true }),
+      'EX',
+      12 * 60,
+    );
   });
 
   it('syncs a gateway snapshot without calling Discord REST', async () => {
@@ -131,8 +184,14 @@ describe('GuildSyncService', () => {
       },
       roles: {
         cache: new Map([
-          ['role-live', { id: 'role-live', name: 'Member', color: 2, position: 1, permissions: { bitfield: 1024n } }],
+          ['role-live', { id: 'role-live', name: 'Member', color: 2, position: 1, permissions: { bitfield: 1024n }, managed: false, tags: {} }],
         ]),
+      },
+      members: {
+        me: {
+          roles: { highest: { id: 'role-live', position: 20 } },
+          permissions: { has: () => false },
+        },
       },
     } as never;
 
@@ -140,8 +199,17 @@ describe('GuildSyncService', () => {
 
     expect(result.guild).toMatchObject({ id: 'guild-123', name: 'Gateway Guild', memberCount: 12 });
     expect(result.channels).toEqual([{ id: 'channel-live', name: 'chat', category: 'General' }]);
-    expect(result.roles).toEqual([{ id: 'role-live', name: 'Member', color: 2, position: 1 }]);
+    expect(result.roles).toEqual([{
+      id: 'role-live', name: 'Member', color: 2, position: 1,
+      permissions: '1024', managed: false, tags: {},
+    }]);
     expect(inserts.map(({ table }) => table)).toEqual(expect.arrayContaining([guildChannels, guildRoles]));
+    expect(redisClient.set).toHaveBeenCalledWith(
+      'guild:guild-123:bot-status',
+      JSON.stringify({ highestPosition: 20, highestRoleId: 'role-live', manageRoles: false }),
+      'EX',
+      12 * 60,
+    );
     expect(redisClient.set).toHaveBeenCalledWith(
       guildChannelsCacheKey('guild-123'),
       JSON.stringify(result.channels),
@@ -151,6 +219,32 @@ describe('GuildSyncService', () => {
     expect(discord.getGuildAsBot).not.toHaveBeenCalled();
     expect(discord.getGuildChannels).not.toHaveBeenCalled();
     expect(discord.getGuildRoles).not.toHaveBeenCalled();
+  });
+
+  it('refreshes cached bot hierarchy after a role event', async () => {
+    const { service, redisClient } = makeService();
+    const guild = {
+      id: 'guild-123',
+      members: {
+        me: {
+          roles: { highest: { id: '100000000000000001', position: 9 } },
+          permissions: { has: () => true },
+        },
+      },
+    } as never;
+
+    await service.refreshBotStatusFromGateway(guild);
+
+    expect(redisClient.set).toHaveBeenCalledWith(
+      'guild:guild-123:bot-status',
+      JSON.stringify({
+        highestPosition: 9,
+        highestRoleId: '100000000000000001',
+        manageRoles: true,
+      }),
+      'EX',
+      12 * 60,
+    );
   });
 
   it('uses a distributed 30-second per-guild refresh cooldown', async () => {
@@ -217,7 +311,10 @@ describe('GuildSyncService', () => {
 
     expect(inserts).toContainEqual({
       table: guildRoles,
-      values: { guildId: 'guild-123', id: 'role-new', name: 'DexBotX', color: 0, position: 0 },
+      values: {
+        guildId: 'guild-123', id: 'role-new', name: 'DexBotX', color: 0, position: 0,
+        permissions: '0', managed: false, tags: {},
+      },
     });
   });
 });

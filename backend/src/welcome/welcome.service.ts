@@ -14,6 +14,7 @@ import { defaultMessageConfig, MessageConfig, MessageKind } from '../shared/mess
 import type { PlaceholderContext } from '../shared/placeholders';
 import { createCardKey, RENDER_VERSION } from '../shared/card-key';
 import { RedisService } from '../redis/redis.service';
+import { defaultAutoRoleConfig } from '../shared/auto-roles';
 
 export { RENDER_VERSION };
 
@@ -105,6 +106,7 @@ export class WelcomeService {
           guildId: guild.id,
           [kind]: config,
           [other]: defaultMessageConfig(other),
+          autoRoles: defaultAutoRoleConfig(),
           updatedBy: session.userId,
           updatedAt: now,
         } as typeof guildSettings.$inferInsert)
@@ -133,6 +135,7 @@ export class WelcomeService {
           guildId: guild.id,
           [kind]: config,
           [other]: before[other],
+          autoRoles: before.autoRoles,
           updatedBy: session.userId,
           updatedAt: now,
         } as typeof guildSettings.$inferInsert)
