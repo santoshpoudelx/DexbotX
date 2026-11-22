@@ -1,7 +1,8 @@
 import { z } from 'zod';
 
 export const MAX_AUTO_ROLES = 1;
-export const MAX_AUTO_ROLE_DELAY_SECONDS = 480;
+export const AUTO_ROLE_MAX_DELAY_SECONDS = 30;
+export const AUTO_ROLE_SLOT_SPACING_MS = 1000;
 
 const DEFAULT_AUTO_ROLE_MESSAGE = 'Congratulations {user} You unlocked new {role} role.';
 const DEFAULT_AUTO_ROLE_EMBED = {
@@ -15,9 +16,7 @@ const DEFAULT_AUTO_ROLE_EMBED = {
 export const defaultAutoRoleConfig = (): AutoRoleConfig => ({
   enabled: false,
   roleIds: [],
-  delayMode: 'smart',
-  minDelaySeconds: 0,
-  fixedDelaySeconds: 0,
+  delaySeconds: 3,
   skipBots: true,
   waitForScreening: true,
   announce: {
@@ -37,9 +36,7 @@ export interface AutoRoleBotStatus {
 export interface AutoRoleConfig {
   enabled: boolean;
   roleIds: string[];
-  delayMode: 'smart' | 'fixed';
-  minDelaySeconds: number;
-  fixedDelaySeconds: number;
+  delaySeconds: number;
   skipBots: boolean;
   waitForScreening: boolean;
   announce: {
@@ -62,9 +59,7 @@ const allowedVariables = new Set(['user', 'username', 'role', 'server', 'memberC
 export const autoRoleConfigSchema = z.object({
   enabled: z.boolean(),
   roleIds: z.array(z.string().regex(/^\d{17,20}$/)).max(MAX_AUTO_ROLES),
-  delayMode: z.enum(['smart', 'fixed']),
-  minDelaySeconds: z.number().int().min(0).max(MAX_AUTO_ROLE_DELAY_SECONDS),
-  fixedDelaySeconds: z.number().int().min(0).max(MAX_AUTO_ROLE_DELAY_SECONDS),
+  delaySeconds: z.number().int().min(0).max(AUTO_ROLE_MAX_DELAY_SECONDS).default(3),
   skipBots: z.boolean(),
   waitForScreening: z.boolean(),
   announce: z.object({
@@ -96,7 +91,7 @@ export const autoRoleConfigSchema = z.object({
 
 export function clampAutoRoleDelay(value: number): number {
   if (!Number.isFinite(value)) return 0;
-  return Math.max(0, Math.min(MAX_AUTO_ROLE_DELAY_SECONDS, Math.floor(value)));
+  return Math.max(0, Math.min(AUTO_ROLE_MAX_DELAY_SECONDS, Math.floor(value)));
 }
 
 export function normalizeAutoRoleConfig(raw: unknown): AutoRoleConfig {
@@ -105,9 +100,8 @@ export function normalizeAutoRoleConfig(raw: unknown): AutoRoleConfig {
     const embed = parsed.data.announce.embed;
     return {
       ...parsed.data,
-      delayMode: 'smart',
-      minDelaySeconds: 0,
-      fixedDelaySeconds: 0,
+      delaySeconds: clampAutoRoleDelay(parsed.data.delaySeconds),
+      waitForScreening: true,
       announce: {
         ...parsed.data.announce,
         embed: {
@@ -129,15 +123,22 @@ export function normalizeAutoRoleConfig(raw: unknown): AutoRoleConfig {
     : {};
   const oldRoleIds = Array.isArray(r.roleIds) ? r.roleIds : [];
   const firstRole = oldRoleIds.find((id) => typeof id === 'string' && /^\d{17,20}$/.test(id));
+  const legacyDelay = typeof r.delaySeconds === 'number'
+    ? r.delaySeconds
+    : r.delayMode === 'fixed'
+      ? typeof r.fixedDelaySeconds === 'number' ? r.fixedDelaySeconds : 3
+      : typeof r.minDelaySeconds === 'number'
+        ? r.minDelaySeconds
+        : typeof r.fixedDelaySeconds === 'number'
+          ? r.fixedDelaySeconds
+          : 3;
 
   return {
     enabled: typeof r.enabled === 'boolean' ? r.enabled : false,
     roleIds: typeof firstRole === 'string' ? [firstRole] : [],
-    delayMode: 'smart',
-    minDelaySeconds: 0,
-    fixedDelaySeconds: 0,
+    delaySeconds: clampAutoRoleDelay(legacyDelay),
     skipBots: typeof r.skipBots === 'boolean' ? r.skipBots : true,
-    waitForScreening: typeof r.waitForScreening === 'boolean' ? r.waitForScreening : true,
+    waitForScreening: true,
     announce: {
       enabled: typeof announce.enabled === 'boolean' ? announce.enabled : false,
       channelId: typeof announce.channelId === 'string' && /^\d{17,20}$/.test(announce.channelId)
@@ -216,40 +217,18 @@ export function renderAutoRoleEmbed(
 }
 
 export interface AutoRoleDelayInput {
-  mode: 'smart' | 'fixed';
-  minDelaySeconds: number;
-  fixedDelaySeconds: number;
-  joinsLastMinute: number;
-  queueWaiting: number;
-  discordBlockedSeconds: number;
+  delaySeconds?: number;
   nextFreeSlotSeconds: number;
-  jitterSeed?: number;
 }
 
 export function computeAutoRoleDelay(input: AutoRoleDelayInput): number {
-  if (input.mode === 'fixed') return clampAutoRoleDelay(input.fixedDelaySeconds);
-  if (
-    clampNonNegative(input.joinsLastMinute) <= 2
-    && clampNonNegative(input.queueWaiting) < 20
-    && clampNonNegative(input.discordBlockedSeconds) === 0
-  ) {
-    const jitterSeed = input.jitterSeed ?? Math.random();
-    const quietDelay = Math.max(
-      clampNonNegative(input.nextFreeSlotSeconds),
-      Math.floor(jitterSeed * 4),
-    );
-    return clampAutoRoleDelay(Math.max(clampNonNegative(input.minDelaySeconds), quietDelay));
-  }
-  const calculated =
-    Math.max(
-      clampNonNegative(input.nextFreeSlotSeconds),
-      clampNonNegative(input.joinsLastMinute) * 4
-      + clampNonNegative(input.queueWaiting) * 0.5
-      + clampNonNegative(input.discordBlockedSeconds),
-    );
-  const jitterSeed = input.jitterSeed ?? Math.random();
-  const withJitter = calculated + calculated * 0.1 * Math.max(0, Math.min(1, jitterSeed));
-  return clampAutoRoleDelay(Math.max(clampNonNegative(input.minDelaySeconds), withJitter));
+  const configured = clampAutoRoleDelay(input.delaySeconds ?? 3);
+  return clampAutoRoleDelay(Math.max(configured, clampNonNegative(input.nextFreeSlotSeconds)));
+}
+
+export function secondsToMilliseconds(seconds: number): number {
+  if (!Number.isFinite(seconds)) throw new Error('Delay must be a finite number of seconds');
+  return Math.max(0, Math.ceil(seconds * 1000));
 }
 
 export function clampNonNegative(value: number): number {

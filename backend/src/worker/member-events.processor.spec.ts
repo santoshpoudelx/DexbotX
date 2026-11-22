@@ -15,7 +15,8 @@ function makeHarness() {
   const redisClient = {
     get: jest.fn(async (_key: string) => null as string | null),
     set: jest.fn(async (_key: string, _value: string, ..._args: Array<string | number>) => 'OK' as string | null),
-    eval: jest.fn(async (script: string) => script.includes('LRANGE') ? batch : 1),
+    eval: jest.fn(async (script: string) =>
+      script.includes('LRANGE') ? batch : script.includes('now+tonumber(ARGV[2])') ? 0 : 1),
     scan: jest.fn(async (_cursor: string, ..._args: Array<string | number>) => ['0', []] as [string, string[]]),
     rpush: jest.fn(async (_key: string, _value: string) => 1),
     expire: jest.fn(async (_key: string, _seconds: number) => 1),
@@ -76,6 +77,7 @@ function makeHarness() {
       userId: '900000000000000003',
       username: 'member',
       joinTimestamp: Date.now(),
+      readyTimestamp: Date.now(),
       pending: false,
       memberRoleIds: [],
       ...overrides,
@@ -116,11 +118,33 @@ describe('MemberEventsProcessor auto roles', () => {
     expect(harness.events).toHaveLength(0);
   });
 
-  it('does not process a pending member while screening is required', async () => {
+  it('never processes a pending member', async () => {
     const harness = makeHarness();
 
     await expect(harness.process(harness.makeJob({ pending: true }))).resolves.toBe('skipped-disabled');
     expect(harness.discord.addMemberRole).not.toHaveBeenCalled();
+    expect(harness.events).toMatchObject([{ outcome: 'skipped_pending', delaySeconds: expect.any(Number) }]);
+  });
+
+  it('records elapsed ready-to-assignment delay in seconds', async () => {
+    const harness = makeHarness();
+    const readyTimestamp = Date.now() - 4500;
+
+    await expect(harness.process(harness.makeJob({ readyTimestamp }))).resolves.toBe('sent');
+    expect(harness.events[0]).toMatchObject({ outcome: 'assigned', delaySeconds: 4 });
+  });
+
+  it('keeps rate-limited auto roles delayed until Discord permits the assignment', async () => {
+    const harness = makeHarness();
+    harness.discord.addMemberRole.mockRejectedValue(new DiscordApiError(429, 0, 'Rate limited', 1));
+    const job = harness.makeJob();
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await expect(harness.process(job)).rejects.toBeInstanceOf(DelayedError);
+    }
+
+    expect(harness.discord.addMemberRole).toHaveBeenCalledTimes(3);
+    expect(harness.scheduledTimes).toHaveLength(3);
     expect(harness.events).toHaveLength(0);
   });
 
@@ -182,7 +206,7 @@ describe('MemberEventsProcessor auto roles', () => {
     const now = Date.now();
 
     await expect(harness.process(job)).rejects.toBeInstanceOf(DelayedError);
-    expect(job.updateData).toHaveBeenCalledWith(expect.objectContaining({ rateLimitReschedules: 1 }));
+    expect(job.updateData).not.toHaveBeenCalled();
     const [scheduledAt] = harness.scheduledTimes;
     expect(scheduledAt).toBeGreaterThanOrEqual(now + 2900);
     expect(scheduledAt).toBeLessThanOrEqual(now + 3100);

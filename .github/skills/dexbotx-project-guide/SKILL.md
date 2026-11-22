@@ -18,7 +18,7 @@ DexBotX is an open-source Discord community bot and web dashboard. It targets Di
 
 Current implemented or exposed capabilities:
 - Personalized welcome and goodbye cards/messages, including text, embeds, presets, placeholders, channel selection, and optional custom backgrounds.
-- Automatic assignment of one safe role to new members, with adaptive smart timing, membership-screening support, optional text announcements, and recent activity.
+- Automatic assignment of one safe role to new members after they are ready, with 30-second bounded planning, one-second guild pacing, optional announcements, and recent activity/diagnostics.
 - Guild onboarding/invitation flow and automatic synchronization of guild metadata, channels, roles, and membership state.
 - Discord slash moderation commands: `/kick`, `/ban`, `/unban`, `/timeout`, and `/untimeout`, with permission guards, DM notices, Redis rate limiting, metrics, and audit logging.
 - Discord OAuth dashboard login and guild-level access control.
@@ -116,6 +116,7 @@ The bot, API, and worker are separate long-lived processes sharing PostgreSQL an
 │   ├── drizzle/                      # SQL migrations and Drizzle metadata
 │   │   ├── 0005_auto_roles.sql       # Auto-role settings, role metadata, and event table
 │   │   ├── 0006_auto_roles_defaults.sql # Align SQL default with current Auto Roles defaults
+│   │   ├── 0007_auto_roles_30_seconds.sql # 30-second pacing, activity delay, and outcome codes
 │   │   └── meta/                     # Drizzle migration journal and schema snapshots
 │   ├── scripts/register-commands.ts  # Discord slash-command registration
 │   ├── test/api.e2e-spec.ts          # Backend API end-to-end suite
@@ -134,7 +135,7 @@ The bot, API, and worker are separate long-lived processes sharing PostgreSQL an
 │       ├── db/                       # Drizzle database service, schema, migration/backfill scripts
 │       ├── discord/                  # Discord REST, channel access, onboarding
 │       ├── guilds/                   # Guild API, access guard, sync events, invite
-│       │   ├── auto-roles.service.ts # Auto-role settings, cached channel status, role safety, test, activity
+│       │   ├── auto-roles.service.ts # Auto-role settings, role safety, test, activity, diagnosis
 │       │   └── auto-roles.service.spec.ts # Role classification and cache-only GET checks
 │       ├── health/                   # Dependency health/readiness controller
 │       ├── metrics/                  # Prometheus metrics and HTTP interceptor
@@ -144,7 +145,8 @@ The bot, API, and worker are separate long-lived processes sharing PostgreSQL an
 │       ├── render/                   # Card/message rendering
 │       ├── shared/                   # Card, crypto, permissions, presets, placeholders, auto-role helpers/tests
 │       │   ├── auto-roles.ts         # Auto-role validation, timing, template, and safety helpers
-│       │   └── auto-roles.spec.ts    # Auto-role normalization and policy tests
+│       │   ├── auto-roles.spec.ts    # Auto-role normalization and policy tests
+│       │   └── job-id.ts             # Validated BullMQ custom job IDs
 │       ├── storage/                  # Supabase Storage adapter
 │       ├── templates/                # Public preset/template endpoints
 │       ├── welcome/                  # Welcome/goodbye save, reset, preview, test
@@ -225,6 +227,7 @@ The bot, API, and worker are separate long-lived processes sharing PostgreSQL an
 | PUT | `/guilds/:guildId/auto-roles` | Save and validate Auto Roles settings | Session + guild access |
 | POST | `/guilds/:guildId/auto-roles/test` | Send a saved test announcement, including its optional embed | Session + guild access; 3/min |
 | GET | `/guilds/:guildId/auto-roles/activity` | Last 20 automatic role outcomes | Session + guild access |
+| GET | `/guilds/:guildId/auto-roles/diagnose` | Current Auto Roles readiness and recent outcomes | Session + guild access |
 | PUT | `/guilds/:guildId/messages/:kind` | Save welcome/goodbye config | Session + guild access |
 | DELETE | `/guilds/:guildId/messages/:kind` | Reset welcome/goodbye config | Session + guild access |
 | POST | `/guilds/:guildId/messages/:kind/preview` | Render PNG preview (supports ETag) | Session + guild access |
@@ -276,9 +279,9 @@ Drizzle ORM plus PostgreSQL. All schema tables use Drizzle and are enabled for R
 | `audit_logs` | id, guild_id, user_id, action, created_at | No FK declared in schema |
 | `admin_audit` | id, admin_id, action, target, details JSONB, created_at | No relations |
 | `mod_actions` | id, guild_id, moderator_id, target_id, action, reason, duration_seconds, created_at | No relations |
-| `auto_role_events` | id, guild_id, user_id, role_id, outcome, created_at | No relations; purged after 14 days |
+| `auto_role_events` | id, guild_id, user_id, role_id, outcome, delay_seconds, created_at | No relations; purged after 14 days |
 
-Migrations: `backend/drizzle/0000_swift_white_tiger.sql`, `0001_guild_data.sql`, `0002_admin_operations.sql`, `0003_mod_actions.sql`, `0004_rls_policies_and_indexes.sql`, `0005_auto_roles.sql`, and `0006_auto_roles_defaults.sql`. Generate with `npm run db:generate`; migrate built output with `npm run db:migrate`. Migration 0005 uses idempotent DDL for additive columns, the activity table/index, and its RLS policy, so reruns tolerate objects that already exist; `IF NOT EXISTS` does not repair an existing object with the wrong definition. Migration 0006 updates only the `auto_roles` column default; it does not rewrite saved settings.
+Migrations: `backend/drizzle/0000_swift_white_tiger.sql` through `0007_auto_roles_30_seconds.sql`. Generate with `npm run db:generate`; migrate built output with `npm run db:migrate`. Migration 0005 uses idempotent DDL for additive columns, the activity table/index, and its RLS policy. Migration 0007 adds actual delay reporting and the `enqueue_failed`/`skipped_pending` outcome codes; legacy delay fields are normalized when settings are read.
 
 ### Auth, validation, guards, config, and middleware
 - Discord OAuth sessions are encrypted in Redis; session cookie name and settings are in `backend/src/auth/cookies.ts` and `session.service.ts`.
@@ -293,13 +296,13 @@ Migrations: `backend/drizzle/0000_swift_white_tiger.sql`, `0001_guild_data.sql`,
 
 ### Jobs, cron, real-time
 - BullMQ queue name: `member-events`; producer `backend/src/bot/bot.service.ts`; consumer `backend/src/worker/member-events.processor.ts`.
-- Welcome/goodbye jobs retry five times with exponential 2-second backoff. Auto-role jobs retry three times with exponential backoff; active Discord `retryAfter` and the shared Discord cooldown are rescheduled through BullMQ delayed state.
-- Auto-role assignment uses per-guild Redis slots and a token-checked assignment lock; member role IDs are cached from gateway add/update/remove events so the worker avoids a Discord member GET.
-- Auto-role timing is always smart and server-calculated; legacy fixed-delay values are normalized to smart timing. Role hierarchy comparisons use Discord's snowflake tie-break for roles at equal positions, and bot hierarchy status is refreshed on role events.
+- Welcome/goodbye jobs retry five times with exponential 2-second backoff. Auto-role jobs use validated hyphenated BullMQ IDs, are removed on completion, and reschedule Discord `retryAfter`/shared cooldown waits indefinitely through delayed state.
+- Auto-role assignment reserves per-guild one-second slots at scheduling and execution time, and uses a token-checked assignment lock; member role IDs are cached from gateway events so the worker avoids a Discord member GET.
+- Auto-role settings use a 0-30 second automatic delay (default 3); load spacing is capped at 30 seconds. Members are never assigned while pending, even for legacy settings that disabled the screening wait. Legacy delay fields normalize to the new `delaySeconds` value. Role hierarchy comparisons use Discord's snowflake tie-break for roles at equal positions.
 - A missing or legacy bot-status cache is refreshed from Discord using the current guild-role snapshot before dashboard classification or member assignment.
 - Auto-role announcements are Redis-batched for 20 seconds by guild/channel, support optional embeds and exact user mention allowlists, and do not roll back an assigned role on delivery failure. The worker recovers pending batches with Redis `SCAN` at startup and drains timers after closing the worker during graceful shutdown; pending batch keys expire after 30 minutes.
-- Maximum job age is 30 minutes; settings are re-read at processing time.
-- Auto-role activity is purged on worker startup and then every 24 hours; guild activity rows are removed before the bot-leave state is committed.
+- Welcome/goodbye jobs older than 30 minutes are skipped; auto-role jobs are not discarded for age and re-read settings at processing time.
+- Auto-role activity records include elapsed ready-to-outcome delay and machine-readable outcomes, including enqueue failures. Activity and diagnosis endpoints expose recent outcomes. Activity is purged on worker startup and then every 24 hours; guild activity rows are removed before the bot-leave state is committed.
 - No conventional cron package is present. Guild sync uses 3-hour intervals and bot heartbeats use 20-second Redis writes.
 - SSE route: `GET /events/guilds`.
 - Native WebSocket path: `/ws`; ticket `POST /ws/ticket`, origin/ticket/session validation, per-guild rooms, 25-second ping.
@@ -350,7 +353,7 @@ App Router under `frontend/src/app/`.
 - RTK Query keeps state for auth, guilds, guild details, channels, roles, presets, and mutations.
 - Auto Roles save follows the Welcome/Goodbye save lifecycle: local and server validation errors are shown on their fields, and saved state/cache update only after the server confirms success.
 - The Auto Roles dashboard reloads the config returned by the backend when navigating between guilds, rather than retaining the previous guild's draft. Backend normalization applies default embed title, description, and footer text when those values are missing or blank. Channel and activity fetch errors are shown explicitly rather than appearing as perpetual loading or empty activity. Saving updates the current RTK cache directly; connected guild dashboards also invalidate guild settings when an Auto Roles settings revision arrives over WebSocket.
-- Auto Roles always uses backend-calculated adaptive timing; the dashboard has no delay controls.
+- Auto Roles always uses backend-calculated timing; the dashboard has no delay controls and screening cannot be disabled.
 - The role picker is left-aligned without a duplicate selected-role label; announcement channels use a simple select without a search field.
 - `src/lib/realtime.ts` provides native WebSocket live guild event handling.
 - `src/lib/site.ts`, `src/lib/seo.ts` hold public-site metadata; `src/lib/message-schema.ts` mirrors backend message validation.
@@ -411,10 +414,10 @@ Command handling, rate limit (20 moderation actions per moderator per guild per 
 5. The worker updates `lastMessageAt`, metrics, and failure lists.
 
 ### Auto role on member join
-1. `BotService` checks Auto Roles settings, skips disabled/bot/pending members as configured, caches gateway role IDs, and de-duplicates the join using `guildId:userId:joinTimestamp`.
-2. The shard atomically increments a per-guild 60-second Redis join counter (repairing a missing TTL if needed), reads queue depth from a 5-second cache, atomically reserves a smart-timing slot, and enqueues an `autorole:<guildId>:<userId>:<joinTimestamp>` delayed BullMQ job.
-3. If membership screening is enabled, `GuildMemberUpdate` enqueues after `pending` changes from true to false. The worker reads settings again, checks cached member role IDs and current role safety, then PUTs the single role with audit reason `DexBotX auto role`.
-4. The worker records an outcome in `auto_role_events`; a successful assignment optionally enters the 20-second Redis announcement batch. Auto Roles settings/checks are returned by `GET /guilds/:guildId`; save/test/activity use `PUT /guilds/:guildId/auto-roles`, `POST /guilds/:guildId/auto-roles/test`, and `GET /guilds/:guildId/auto-roles/activity`.
+1. `BotService` processes the welcome step before auto-role scheduling. It caches gateway role IDs, skips disabled/bot members, and stores a Redis marker for pending members; every enqueue path requires `pending === false`.
+2. After readiness, the shard deduplicates by Redis key, reserves one-second per-guild pacing slots, and enqueues `autorole-<guildId>-<userId>-<joinTimestamp>` through the shared job-ID validator.
+3. Any ready-state `GuildMemberUpdate` can trigger scheduling without relying on the old member's pending state; the Redis marker/recent join check and dedupe prevent missed screening transitions and duplicate jobs. The worker re-reads settings, confirms readiness, rate-paces assignments, checks cached role IDs and current role safety, then PUTs the role with audit reason `DexBotX auto role`.
+4. The worker records elapsed seconds and machine-readable outcomes in `auto_role_events`; rate limits reschedule rather than discard assignments. A successful assignment optionally enters the 20-second Redis announcement batch. Save/test/activity/diagnose use `PUT /guilds/:guildId/auto-roles`, `POST /guilds/:guildId/auto-roles/test`, `GET /guilds/:guildId/auto-roles/activity`, and `GET /guilds/:guildId/auto-roles/diagnose`.
 5. Channel-send status in the settings GET is read only from Redis. Saving an enabled announcement persists without waiting for Discord permission repair; that check/repair runs in the background and refreshes the five-minute Redis status cache.
 
 ### Dashboard Discord login
@@ -595,6 +598,8 @@ Use a fresh disposable Redis container for each E2E run. If reusing a test-only 
 - `GuildAccessGuard` protects guild routes; `AdminGuard` protects admin routes.
 - Redis keys and pub/sub channels are constants/functions in nearby domain files (`guild-events.ts`, cache services).
 - Auto-role safety is centralized in `backend/src/shared/auto-roles.ts`, compares equal-position roles using Discord snowflake ordering, and is applied when saving and immediately before assignment.
+- BullMQ custom job IDs use `makeJobId(...)` from `backend/src/shared/job-id.ts`; Redis key names may contain colons, but custom job IDs use only letters, digits, hyphens, and underscores. Auto-role IDs are `autorole-<guildId>-<userId>-<joinTimestamp>`.
+- Auto-role pacing is fully automatic and capped at 30 seconds. The dashboard exposes no delay slider; legacy saved delay fields are normalized to a 0-30 second `delaySeconds` value, defaulting to 3 seconds.
 - If cached bot hierarchy is missing or predates the cached highest-role ID, `GuildSyncService.getBotStatus` refreshes it from Discord before role classification; a missing cache is not treated as a bot role at position zero.
 - Backend logs use Nest `Logger`/Pino. Add context and avoid logging cookies, tokens, or authorization headers.
 - Catch and sanitize Discord/user-facing errors; the global exception filter must not expose internals.
@@ -697,7 +702,8 @@ Use a fresh disposable Redis container for each E2E run. If reusing a test-only 
 | 2026-11-21 | Surface Auto Roles channel/activity query failures instead of showing a loading placeholder or empty-activity state | `frontend/src/app/dashboard/[guildId]/auto-roles/page.tsx`; `frontend/src/app/dashboard/[guildId]/auto-roles/page.spec.tsx`; frontend components section |
 | 2026-11-21 | Keep Auto Roles saves independent of Discord permission-repair latency, broadcast settings revisions through WebSocket, and convert proxy deadlines to explicit 504 responses | `backend/src/guilds/auto-roles.service.ts`; `backend/src/realtime/realtime.gateway.ts`; `frontend/src/lib/realtime.ts`; `frontend/src/app/api/[[...path]]/route.ts`; related tests; relevant guide sections |
 | 2026-11-21 | Show Auto Roles enabled/disabled status and a direct settings link on the guild overview | `frontend/src/components/dashboard/overview-content.tsx`; `frontend/src/components/dashboard/overview-content.spec.tsx`; frontend overview section |
+| 2026-11-22 | Replaced colon-containing BullMQ job IDs with validated hyphenated IDs, guaranteed pending-member gating, added elapsed-delay activity/diagnostics, resilient rate-limit rescheduling, and aligned backend documentation | `backend/src/shared/job-id.ts`; `backend/src/queue/member-events.queue.ts`; `backend/src/shared/auto-roles.ts`; `backend/src/bot/bot.service.ts`; `backend/src/worker/member-events.processor.ts`; `backend/src/guilds/guilds.controller.ts`; `backend/src/guilds/auto-roles.service.ts`; `backend/drizzle/0007_auto_roles_30_seconds.sql`; `backend/README.md`; related tests |
 
 ## 15. Last updated
 
-2026-11-21
+2026-11-22

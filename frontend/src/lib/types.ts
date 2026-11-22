@@ -71,9 +71,7 @@ export interface GuildSettings {
 export interface AutoRoleConfig {
   enabled: boolean;
   roleIds: string[];
-  delayMode: 'smart' | 'fixed';
-  minDelaySeconds: number;
-  fixedDelaySeconds: number;
+  delaySeconds: number;
   skipBots: boolean;
   waitForScreening: boolean;
   announce: {
@@ -103,7 +101,8 @@ export interface AutoRoleActivity {
   guildId: string;
   userId: string;
   roleId: string;
-  outcome: 'assigned' | 'skipped_left' | 'skipped_has_role' | 'skipped_unsafe' | 'failed';
+  outcome: 'assigned' | 'skipped_left' | 'skipped_has_role' | 'skipped_unsafe' | 'failed' | 'enqueue_failed' | 'skipped_pending';
+  delaySeconds: number | null;
   createdAt: string;
 }
 
