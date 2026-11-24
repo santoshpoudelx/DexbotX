@@ -1,0 +1,48 @@
+export const ECONOMY_DEFAULTS = {
+  currencyName: 'Dex',
+  economyName: 'Dex Economy',
+  dailyAmount: 50,
+  streakStep: 5,
+  streakCapDays: 7,
+  dailyBoostBonus: 25,
+  stealAmount: 200,
+  minSteal: 5,
+  protectionThreshold: 50,
+  weeklyGiftSendLimit: 100,
+  weeklyGiftReceiveLimit: 200,
+  minAccountAgeDays: 7,
+  minServerHours: 24,
+  bountyMin: 50,
+  bountyMax: 500,
+  commandCooldownSeconds: 3,
+  timezone: 'Asia/Kathmandu',
+  heistAnnounceChannelId: null,
+  pingVictim: false,
+  mirrorHeistsToAnnouncements: false,
+  announcementEvents: {
+    gifts: true,
+    rolePurchases: true,
+    customTitles: true,
+    streakMilestones: true,
+  },
+} as const;
+
+export const ROBBING_TOOL_MAX_AMOUNT = 200;
+
+export const ECONOMY_LIMITS = {
+  dailyAmount: [10, 500],
+  streakStep: [0, 50],
+  streakCapDays: [1, 7],
+  dailyBoostBonus: [0, 100],
+  stealAmount: [1, ROBBING_TOOL_MAX_AMOUNT],
+  minSteal: [1, 100],
+  protectionThreshold: [50, 1000],
+  weeklyGiftSendLimit: [0, 1000],
+  weeklyGiftReceiveLimit: [0, 2000],
+  minAccountAgeDays: [0, 365],
+  minServerHours: [0, 720],
+  bountyMin: [10, 5000],
+  bountyMax: [10, 5000],
+  commandCooldownSeconds: [1, 60],
+  itemPrice: [1, 1_000_000],
+} as const;

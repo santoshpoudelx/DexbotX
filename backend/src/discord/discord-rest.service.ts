@@ -312,11 +312,11 @@ export class DiscordRestService {
     return this.request<DiscordRole[]>(`/guilds/${guildId}/roles`, { headers: this.bot() });
   }
 
-  createRole(guildId: string, name: string, permissions: string): Promise<DiscordRole> {
+  createRole(guildId: string, name: string, permissions: string, color = 0): Promise<DiscordRole> {
     return this.request<DiscordRole>(`/guilds/${guildId}/roles`, {
       method: 'POST',
       headers: { ...this.bot(), 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, permissions, mentionable: false, hoist: true }),
+      body: JSON.stringify({ name, permissions, color, mentionable: false, hoist: false }),
     });
   }
 
@@ -357,6 +357,65 @@ export class DiscordRestService {
       method: 'POST',
       headers: { ...this.bot(), 'Content-Type': 'application/json' },
       body: JSON.stringify({ recipient_id: userId }),
+    });
+  }
+
+  async createGuildChannel(guildId: string, body: Record<string, unknown>): Promise<DiscordChannel> {
+    return this.request<DiscordChannel>(`/guilds/${guildId}/channels`, {
+      method: 'POST',
+      headers: { ...this.bot(), 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  }
+
+  async editGuildChannel(channelId: string, body: Record<string, unknown>): Promise<DiscordChannel> {
+    return this.request<DiscordChannel>(`/channels/${channelId}`, {
+      method: 'PATCH',
+      headers: { ...this.bot(), 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  }
+
+  async getChannelMessage(channelId: string, messageId: string): Promise<{ id: string }> {
+    return this.request<{ id: string }>(`/channels/${channelId}/messages/${messageId}`, {
+      headers: this.bot(),
+    });
+  }
+
+  async deleteChannelMessage(channelId: string, messageId: string): Promise<void> {
+    await this.request<void>(`/channels/${channelId}/messages/${messageId}`, {
+      method: 'DELETE',
+      headers: this.bot(),
+    });
+  }
+
+  async deleteGuildChannel(channelId: string): Promise<void> {
+    await this.request<void>(`/channels/${channelId}`, {
+      method: 'DELETE',
+      headers: this.bot(),
+    });
+  }
+
+  async createChannelMessage(channelId: string, payload: Record<string, unknown>): Promise<{ id: string }> {
+    return this.request<{ id: string }>(`/channels/${channelId}/messages`, {
+      method: 'POST',
+      headers: { ...this.bot(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...payload, allowed_mentions: payload.allowed_mentions ?? { parse: [] } }),
+    });
+  }
+
+  async editChannelMessage(channelId: string, messageId: string, payload: Record<string, unknown>): Promise<void> {
+    await this.request<void>(`/channels/${channelId}/messages/${messageId}`, {
+      method: 'PATCH',
+      headers: { ...this.bot(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...payload, allowed_mentions: { parse: [] } }),
+    });
+  }
+
+  async pinChannelMessage(channelId: string, messageId: string): Promise<void> {
+    await this.request<void>(`/channels/${channelId}/pins/${messageId}`, {
+      method: 'PUT',
+      headers: this.bot(),
     });
   }
 

@@ -13,9 +13,10 @@ import { MetricsModule } from './metrics/metrics.module';
 import { TemplatesModule } from './templates/templates.module';
 import { WelcomeModule } from './welcome/welcome.module';
 import { RealtimeModule } from './realtime/realtime.module';
+import { EconomyModule } from './economy/economy.module';
 
 @Module({
-  imports: [CoreModule, AdminModule, AuthModule, GuildsModule, WelcomeModule, AssetsModule, TemplatesModule, HealthModule, MetricsModule, RealtimeModule],
+  imports: [CoreModule, AdminModule, AuthModule, GuildsModule, EconomyModule, WelcomeModule, AssetsModule, TemplatesModule, HealthModule, MetricsModule, RealtimeModule],
   providers: [
     { provide: APP_GUARD, useClass: RequestGuard },
     { provide: APP_FILTER, useClass: AllExceptionsFilter },

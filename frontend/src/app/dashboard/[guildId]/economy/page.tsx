@@ -689,11 +689,18 @@ function EconomyEditor({
       )}
 
       <div className="pointer-events-none fixed inset-x-0 bottom-4 z-20 flex justify-center px-4" aria-live="polite">
+<<<<<<< Updated upstream
         <div
           className={cn('pointer-events-auto flex items-center gap-3 rounded-2xl border border-border bg-card/95 px-4 py-2.5 shadow-2xl backdrop-blur transition-all', hasUnsavedChanges ? 'translate-y-0 opacity-100' : 'pointer-events-none translate-y-4 opacity-0')}
           aria-hidden={!hasUnsavedChanges}
           inert={!hasUnsavedChanges}
         >
+=======
+        <div className={cn(
+          'pointer-events-auto flex flex-wrap items-center justify-center gap-3 rounded-2xl border border-border bg-card/95 px-4 py-2.5 shadow-2xl backdrop-blur transition-all',
+          hasUnsavedChanges ? 'translate-y-0 opacity-100' : 'pointer-events-none translate-y-4 opacity-0',
+        )} aria-hidden={!hasUnsavedChanges} inert={!hasUnsavedChanges}>
+>>>>>>> Stashed changes
           <span className="text-sm">Unsaved changes</span>
           <Button
             type="button"
@@ -718,7 +725,11 @@ function EconomyEditor({
           <Button type="submit" form="economy-role-items-form" size="sm" disabled={savingChanges}>
             <Save aria-hidden="true" /> {savingChanges ? 'Saving…' : 'Save changes'}
           </Button>
+<<<<<<< Updated upstream
         </div>
+=======
+          </div>
+>>>>>>> Stashed changes
       </div>
     </div>
   );

@@ -3,6 +3,7 @@ import Link from 'next/link';
 import {
   Bot,
   Code2,
+  Coins,
   LayoutDashboard,
   Music2,
   Radio,
@@ -24,6 +25,7 @@ const FEATURE_ICONS: Record<string, LucideIcon> = {
   Moderation: ShieldCheck,
   'Welcome and Goodbye': UsersRound,
   'Auto Roles': Bot,
+  Economy: Coins,
   'Anti-Spam': ShieldAlert,
   'Social Notifications': Radio,
   'AI Auto Chat': Sparkles,

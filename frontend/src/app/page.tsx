@@ -33,6 +33,11 @@ const FEATURES = [
     href: '/features/auto-roles',
   },
   {
+    name: 'Economy',
+    description: 'Enable an opt-in Dex economy with daily rewards, a Discord store, gifts, anytime robberies, and purchasable server roles.',
+    href: '/features',
+  },
+  {
     name: 'Anti-Spam',
     description: 'Add anti-spam automation to your server toolkit. Keep it alongside your moderation setup and review the controls available for your server in the dashboard.',
     href: '/features/moderation',
@@ -90,7 +95,7 @@ export default function Home() {
                 </li>
                 <li className="rounded-xl border border-white/10 bg-white/[0.04] p-5">
                   <h3 className="font-semibold text-white">3. Configure your features</h3>
-                  <p className="mt-2 text-sm leading-6 text-white/65">Set up welcome messages and review other available options, such as roles, moderation, and social notifications. Check permissions before enabling automation.</p>
+                  <p className="mt-2 text-sm leading-6 text-white/65">Set up welcome messages and review other options, such as roles, moderation, social notifications, and the opt-in Dex economy. Check permissions before enabling automation.</p>
                 </li>
               </ol>
               <p className="mt-6 text-sm text-white/65">

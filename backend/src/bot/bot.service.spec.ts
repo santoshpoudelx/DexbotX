@@ -1,5 +1,6 @@
 import { BotService } from './bot.service';
 import { defaultAutoRoleConfig } from '../shared/auto-roles';
+import { Events, MessageFlags } from 'discord.js';
 
 function makeHarness() {
   const config = defaultAutoRoleConfig();
@@ -77,5 +78,75 @@ describe('BotService auto-role scheduling', () => {
       script.includes("redis.call('INCR'"));
     expect(counterScript?.[0]).toContain("redis.call('EXPIRE'");
     harness.service.client.destroy();
+  });
+});
+
+describe('BotService economy interaction acknowledgement', () => {
+  async function dispatchEconomyCommand(deferReply: jest.Mock, onHandle: () => Promise<void> = async () => undefined) {
+    const listeners = new Map<string, (...args: unknown[]) => void>();
+    const client = {
+      once: jest.fn(),
+      on: jest.fn((event: string, listener: (...args: unknown[]) => void) => listeners.set(event, listener)),
+      login: jest.fn().mockResolvedValue('token'),
+      destroy: jest.fn().mockResolvedValue(undefined),
+    };
+    const economyCommands = { handle: jest.fn(onHandle) };
+    const service = new BotService(
+      { discordBotToken: 'test-token' } as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      economyCommands as never,
+    );
+    Object.defineProperty(service, 'client', { value: client });
+    const logger = (service as unknown as { logger: { warn: (message: string) => void } }).logger;
+    const warn = jest.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    await service.onApplicationBootstrap();
+
+    const interaction = {
+      guild: { id: '100000000000000001' },
+      commandName: 'reward',
+      createdTimestamp: Date.now() - 50,
+      deferred: false,
+      replied: false,
+      isChatInputCommand: () => true,
+      isButton: () => false,
+      isStringSelectMenu: () => false,
+      isModalSubmit: () => false,
+      isAutocomplete: () => false,
+      deferReply,
+    };
+    listeners.get(Events.InteractionCreate)?.(interaction);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    return { interaction, economyCommands, warn };
+  }
+
+  it('defers before dispatching economy command work', async () => {
+    const order: string[] = [];
+    const deferReply = jest.fn(async () => {
+      order.push('defer');
+    });
+    const { economyCommands } = await dispatchEconomyCommand(deferReply, async () => {
+      order.push('handle');
+    });
+
+    expect(deferReply).toHaveBeenCalledWith({ flags: MessageFlags.Ephemeral });
+    expect(order).toEqual(['defer', 'handle']);
+    expect(economyCommands.handle).toHaveBeenCalledTimes(1);
+  });
+
+  it('logs expired interactions without dispatching command work', async () => {
+    const deferReply = jest.fn().mockRejectedValue({ code: 10062 });
+    const { economyCommands, warn } = await dispatchEconomyCommand(deferReply);
+
+    expect(economyCommands.handle).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('expired before acknowledgement'));
   });
 });

@@ -6,9 +6,11 @@ import { RenderModule } from '../render/render.module';
 import { StorageModule } from '../storage/storage.module';
 import { MemberEventsProcessor } from './member-events.processor';
 import { GuildsModule } from '../guilds/guilds.module';
+import { EconomyModule } from '../economy/economy.module';
+import { EconomyWindowProcessor } from './economy-window.processor';
 
 @Module({
-  imports: [CoreModule, RenderModule, DiscordModule, StorageModule, MetricsModule, GuildsModule],
-  providers: [MemberEventsProcessor],
+  imports: [CoreModule, RenderModule, DiscordModule, StorageModule, MetricsModule, GuildsModule, EconomyModule],
+  providers: [MemberEventsProcessor, EconomyWindowProcessor],
 })
 export class WorkerModule {}

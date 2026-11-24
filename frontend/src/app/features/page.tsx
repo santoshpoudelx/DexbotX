@@ -23,6 +23,12 @@ const CORE_FEATURES = [
     description: 'Use role automation to support member onboarding and organize your server.',
   },
   {
+    name: 'Economy',
+    description: 'Enable an opt-in Dex economy with daily rewards, a Discord store, gifts, anytime robberies, and safe purchasable server roles.',
+    href: '/dashboard',
+    linkText: 'Open the dashboard',
+  },
+  {
     name: 'Welcome and Goodbye',
     description: 'Configure separate join and departure messages, customize text and member cards, and preview changes in the dashboard.',
     href: '/features/welcome-bot',
@@ -54,10 +60,6 @@ const CORE_FEATURES = [
 
 const PLANNED_FEATURES = [
   {
-    name: 'Economy feature',
-    description: 'An economy feature is planned and is not available in the current release.',
-  },
-  {
     name: '24/7 Music',
     description: '24/7 music with custom playlists is planned and is not available in the current release.',
   },
@@ -78,7 +80,7 @@ export default function FeaturesPage() {
               DexBotX features for Discord communities
             </h1>
             <p className="mt-5 max-w-3xl leading-7 text-muted-foreground">
-              DexBotX is a free, open-source Discord bot with an easy web dashboard for anti-spam, social notifications, AI auto chat, auto roles, welcome and goodbye, and moderation.
+              DexBotX is a free, open-source Discord bot with an easy web dashboard for anti-spam, social notifications, AI auto chat, auto roles, welcome and goodbye, moderation, and an opt-in Dex economy.
             </p>
             <div className="mt-6"><AddToDiscordButton /></div>
           </header>

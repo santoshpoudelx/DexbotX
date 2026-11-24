@@ -140,6 +140,66 @@ export interface Preset {
   config: MessageContent;
 }
 
+export interface EconomySettings {
+  currencyName: string;
+  economyName: string;
+  dailyAmount: number;
+  streakStep: number;
+  streakCapDays: number;
+  dailyBoostBonus: number;
+  stealAmount: number;
+  minSteal: number;
+  protectionThreshold: number;
+  weeklyGiftSendLimit: number;
+  weeklyGiftReceiveLimit: number;
+  minAccountAgeDays: number;
+  minServerHours: number;
+  bountyMin: number;
+  bountyMax: number;
+  commandCooldownSeconds: number;
+  timezone: string;
+  heistAnnounceChannelId: string | null;
+  pingVictim: boolean;
+  mirrorHeistsToAnnouncements: boolean;
+  announcementEvents: {
+    gifts: boolean;
+    rolePurchases: boolean;
+    customTitles: boolean;
+    streakMilestones: boolean;
+  };
+}
+
+export interface EconomyState {
+  enabled: boolean;
+  paused: boolean;
+  channels: Record<string, string | null>;
+  missing: string[];
+  walletCount: number;
+}
+
+export interface EconomyItem {
+  id: number;
+  guildId: string;
+  itemId: string;
+  kind: string;
+  name: string;
+  description: string;
+  price: number;
+  roleId: string | null;
+  stock: number | null;
+  enabled: boolean;
+  isDefault: boolean;
+  sortOrder: number;
+}
+
+export interface EconomySafeRole {
+  id: string;
+  name: string;
+  color: number;
+  position: number;
+  reason: string | null;
+}
+
 export interface ApiErrorBody {
   statusCode: number;
   message: string;

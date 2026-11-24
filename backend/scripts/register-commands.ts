@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import { REST, Routes } from 'discord.js';
+import { createHash } from 'node:crypto';
 import { moderationCommands } from '../src/bot/commands';
 
 async function main(): Promise<void> {
@@ -21,8 +22,40 @@ async function main(): Promise<void> {
   const route = guildId
     ? Routes.applicationGuildCommands(clientId, guildId)
     : Routes.applicationCommands(clientId);
-  await rest.put(route, { body: moderationCommands.map((command) => command.toJSON()) });
-  console.log(`Registered ${moderationCommands.length} moderation commands${guildId ? ` for guild ${guildId}` : ' globally'}.`);
+  const desired = moderationCommands.map((command) => command.toJSON());
+  const projection = (command: unknown): unknown => {
+    if (!command || typeof command !== 'object') return command;
+    const value = command as Record<string, unknown>;
+    return {
+      name: value.name,
+      description: value.description,
+      type: value.type,
+      required: value.required,
+      autocomplete: value.autocomplete,
+      min_value: value.min_value,
+      max_value: value.max_value,
+      min_length: value.min_length,
+      max_length: value.max_length,
+      channel_types: value.channel_types,
+      choices: value.choices,
+      contexts: value.contexts,
+      dm_permission: value.dm_permission,
+      default_member_permissions: value.default_member_permissions,
+      options: Array.isArray(value.options)
+        ? value.options.map((option) => projection(option))
+        : undefined,
+    };
+  };
+  const hash = (commands: unknown[]) => createHash('sha256')
+    .update(JSON.stringify(commands.map(projection)))
+    .digest('hex');
+  const existing = await rest.get(route) as unknown[];
+  if (hash(existing) === hash(desired)) {
+    console.log(`No command changes; skipped overwrite for ${desired.length} bot commands${guildId ? ` in guild ${guildId}` : ' globally'}.`);
+    return;
+  }
+  await rest.put(route, { body: desired });
+  console.log(`Registered ${desired.length} bot commands${guildId ? ` for guild ${guildId}` : ' globally'}.`);
 }
 
 void main().catch((error: unknown) => {

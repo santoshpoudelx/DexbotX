@@ -8,6 +8,7 @@ import {
   GatewayIntentBits,
   Guild,
   GuildMember,
+  MessageFlags,
   type ChatInputCommandInteraction,
   Options,
   PartialGuildMember,
@@ -27,7 +28,19 @@ import { FeatureFlagsService } from '../core/feature-flags.service';
 import { OnboardingService } from '../discord/onboarding.service';
 import { ModerationService } from './moderation.service';
 import * as Sentry from '@sentry/node';
+<<<<<<< Updated upstream
 import { computeAutoRoleDelay, getAutoRoleSafetyReason } from '../shared/auto-roles';
+=======
+import { AUTO_ROLE_SLOT_SPACING_MS, computeAutoRoleDelay, getAutoRoleSafetyReason } from '../shared/auto-roles';
+import { DatabaseService } from '../db/database.service';
+import { autoRoleEvents, economyWallets } from '../db/schema';
+import { EconomyCommandService } from './economy-command.service';
+import { and, eq } from 'drizzle-orm';
+
+function isUnknownInteraction(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === 10062;
+}
+>>>>>>> Stashed changes
 
 @Injectable()
 export class BotService implements OnApplicationBootstrap, OnApplicationShutdown {
@@ -49,6 +62,11 @@ export class BotService implements OnApplicationBootstrap, OnApplicationShutdown
     private readonly onboarding: OnboardingService,
     private readonly redis: RedisService,
     private readonly moderation: ModerationService,
+<<<<<<< Updated upstream
+=======
+    private readonly database: DatabaseService,
+    private readonly economyCommands?: EconomyCommandService,
+>>>>>>> Stashed changes
   ) {
     this.client = new Client({
       // Server Members is a privileged intent: enable it in the Developer Portal (Bot > Privileged Gateway Intents).
@@ -74,8 +92,42 @@ export class BotService implements OnApplicationBootstrap, OnApplicationShutdown
     c.once(Events.ClientReady, (ready) => this.onReady(ready));
     c.on(Events.GuildCreate, (g) => this.safe('guildCreate', () => this.onGuildCreate(g)));
     c.on(Events.InteractionCreate, (interaction) => {
-      if (!interaction.isChatInputCommand() || !interaction.guild) return;
-      void this.handleModerationInteraction(interaction);
+      if (!interaction.guild) return;
+      if (interaction.isChatInputCommand()) {
+        const economyNames = new Set([
+          'economy', 'reward', 'balance', 'shop', 'store', 'buy', 'gift', 'robuser', 'leaderboard',
+        ]);
+        void this.safe('economy-command', async () => {
+          if (!economyNames.has(interaction.commandName)) {
+            await this.handleModerationInteraction(interaction);
+            return;
+          }
+          if (interaction.commandName !== 'buy' && !interaction.deferred && !interaction.replied) {
+            try {
+              await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+            } catch (error) {
+              if (!isUnknownInteraction(error)) throw error;
+              const ageMs = Date.now() - interaction.createdTimestamp;
+              this.logger.warn(`Economy command ${interaction.commandName} expired before acknowledgement (age=${ageMs}ms).`);
+              return;
+            }
+          }
+          await this.economyCommands?.handle(interaction);
+        });
+        return;
+      }
+      if (interaction.isButton()) {
+        void this.safe('economy-button', () => this.economyCommands?.handleButton(interaction) ?? Promise.resolve());
+      }
+      if (interaction.isStringSelectMenu()) {
+        void this.safe('economy-select', () => this.economyCommands?.handleSelectMenu(interaction) ?? Promise.resolve());
+      }
+      if (interaction.isModalSubmit()) {
+        void this.safe('economy-modal', () => this.economyCommands?.handleModalSubmit(interaction) ?? Promise.resolve());
+      }
+      if (interaction.isAutocomplete() && interaction.commandName === 'buy') {
+        void this.safe('economy-autocomplete', () => this.economyCommands?.handleAutocomplete(interaction) ?? Promise.resolve());
+      }
     });
     c.on(Events.GuildUpdate, (_old, g) => this.safe('guildUpdate', () => this.sync.guildUpdated(g)));
     c.on(Events.GuildDelete, (g) => {
@@ -134,11 +186,28 @@ export class BotService implements OnApplicationBootstrap, OnApplicationShutdown
       await this.sync.deleteRole(role.guild.id, role.id);
       await this.sync.refreshBotStatusFromGateway(role.guild);
     }));
+<<<<<<< Updated upstream
     c.on(Events.GuildMemberAdd, (m) => this.safe('welcome', () => this.handleMember('welcome', m)));
     c.on(Events.GuildMemberUpdate, (oldMember, member) => this.safe('auto-role-update', () => this.handleAutoRoleMemberUpdate(oldMember, member)));
     c.on(Events.GuildMemberAdd, (m) => this.safe('auto-role', () => this.handleAutoRoleMemberJoin(m)));
     c.on(Events.GuildMemberRemove, (m) => this.safe('goodbye', async () => {
       await this.redis.client.del(this.memberRolesKey(m.guild.id, m.id));
+=======
+    c.on(Events.GuildMemberAdd, (member) => {
+      void this.database.db.update(economyWallets).set({ leftServer: false, updatedAt: new Date() })
+        .where(and(eq(economyWallets.guildId, member.guild.id), eq(economyWallets.userId, member.id)));
+      void this.safe('welcome', () => this.handleMember('welcome', member))
+        .then(() => this.safe('auto-role', () => this.handleAutoRoleMemberJoin(member)));
+    });
+    c.on(Events.GuildMemberUpdate, (_oldMember, member) => this.safe('auto-role-update', () => this.handleAutoRoleMemberUpdate(member)));
+    c.on(Events.GuildMemberRemove, (m) => this.safe('goodbye', async () => {
+      await this.redis.client.del(
+        this.memberRolesKey(m.guild.id, m.id),
+        `guild:${m.guild.id}:autorole-pending:${m.id}`,
+      );
+      await this.database.db.update(economyWallets).set({ leftServer: true, updatedAt: new Date() })
+        .where(and(eq(economyWallets.guildId, m.guild.id), eq(economyWallets.userId, m.id)));
+>>>>>>> Stashed changes
       await this.handleMember('goodbye', m);
     }));
     c.on(Events.Error, (err) => this.logger.error(`Client error: ${err.message}`));

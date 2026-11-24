@@ -10,6 +10,11 @@ coverage/
 .env
 .env.*
 !.env.example
+.env.test
+!.env.test.example
+local.testing.discord
+local.testing.discord.*
+!local.testing.discord.example
 
 # Local logs and OS metadata
 *.log

@@ -1,0 +1,7 @@
+TEST_DATABASE_URL=postgresql://dexbotx_test:dexbotx_test_password@127.0.0.1:5433/dexbotx_economy_test
+TEST_REDIS_URL=redis://127.0.0.1:6380
+NODE_ENV=test
+DATABASE_SSL=false
+DISCORD_CLIENT_ID=100000000000000001
+DISCORD_CLIENT_SECRET=fake_discord_client_secret
+DISCORD_BOT_TOKEN=fake_discord_bot_token

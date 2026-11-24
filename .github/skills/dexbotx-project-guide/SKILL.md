@@ -18,7 +18,12 @@ DexBotX is an open-source Discord community bot and web dashboard. It targets Di
 
 Current implemented or exposed capabilities:
 - Personalized welcome and goodbye cards/messages, including text, embeds, presets, placeholders, channel selection, and optional custom backgrounds.
+<<<<<<< Updated upstream
 - Automatic assignment of one safe role to new members, with adaptive smart timing, membership-screening support, optional text announcements, and recent activity.
+=======
+- Automatic assignment of one safe role to new members after they are ready, with 30-second bounded planning, one-second guild pacing, optional announcements, and recent activity/diagnostics.
+- Server economy with daily rewards, wallets, shop items, gifts, anytime robberies requiring a consumable tool, a 200-Dex robbery cap and 50-Dex target floor, anonymous bounty announcements, role purchases and an economy dashboard.
+>>>>>>> Stashed changes
 - Guild onboarding/invitation flow and automatic synchronization of guild metadata, channels, roles, and membership state.
 - Discord slash moderation commands: `/kick`, `/ban`, `/unban`, `/timeout`, and `/untimeout`, with permission guards, DM notices, Redis rate limiting, metrics, and audit logging.
 - Discord OAuth dashboard login and guild-level access control.
@@ -30,7 +35,7 @@ Current implemented or exposed capabilities:
 Planned or not implemented in the current code:
 - Automatic moderation (dashboard marks it “coming soon”; slash moderation commands are implemented).
 - AI auto chat, anti-spam automation, and social notifications are described in public copy or previews but do not have a complete backend/configuration implementation found in this repository.
-- Economy and 24/7 music are explicitly not available.
+- 24/7 music is explicitly not available. Economy is implemented with Docker-backed database tests and a manual Discord checklist.
 - Self-service editing of the bot profile image, banner, or description is explicitly not available.
 
 ## 2. Tech Stack
@@ -116,6 +121,12 @@ The bot, API, and worker are separate long-lived processes sharing PostgreSQL an
 │   ├── drizzle/                      # SQL migrations and Drizzle metadata
 │   │   ├── 0005_auto_roles.sql       # Auto-role settings, role metadata, and event table
 │   │   ├── 0006_auto_roles_defaults.sql # Align SQL default with current Auto Roles defaults
+<<<<<<< Updated upstream
+=======
+│   │   ├── 0007_auto_roles_30_seconds.sql # 30-second pacing, activity delay, and outcome codes
+│   │   ├── 0011_robbing_tool_limits.sql # Robbery cap/floor and legacy default store update
+│   │   ├── 0012_store_catalog_copy.sql # Refresh exact legacy descriptions on default economy items
+>>>>>>> Stashed changes
 │   │   └── meta/                     # Drizzle migration journal and schema snapshots
 │   ├── scripts/register-commands.ts  # Discord slash-command registration
 │   ├── test/api.e2e-spec.ts          # Backend API end-to-end suite
@@ -148,6 +159,7 @@ The bot, API, and worker are separate long-lived processes sharing PostgreSQL an
 │       ├── storage/                  # Supabase Storage adapter
 │       ├── templates/                # Public preset/template endpoints
 │       ├── welcome/                  # Welcome/goodbye save, reset, preview, test
+│       ├── economy/                  # Wallets, setup, store, robbery tools, legacy window cleanup and REST APIs
 │       └── worker/                   # BullMQ consumer entry point and processor
 │           └── member-events.processor.spec.ts # Auto-role worker and announcement tests
 ├── frontend/
@@ -207,6 +219,14 @@ The bot, API, and worker are separate long-lived processes sharing PostgreSQL an
 - Guild/member events publish sync state and Redis guild events; welcome/goodbye member events are sent to BullMQ.
 - Slash interactions are delegated to `ModerationService`; bot behavior is not loaded from a generic dynamic command directory beyond the exported list in `bot/commands/index.ts`.
 - Global/guild registration: `npm run commands:deploy` and `npm run commands:deploy -- --guild <guildId>` after compiling the registration script. The script uses Discord REST routes and `moderationCommands`.
+- All economy slash commands are restricted to the configured economy-commands channel once it exists; `/economy on` remains usable before economy setup has created that channel.
+- The economy category and all six channels are public. Regular members cannot send text in any of them; application commands are allowed only in `economy-commands`. Re-running `/economy on` repairs category and channel overwrites, including existing channels.
+- Successful `/reward` claims are posted persistently in `economy-commands` with the amount and streak; no private success confirmation remains.
+- Economy currency is fixed to Dex. The dashboard retains enable/status/pause controls and manages only custom server-role store items; built-in items remain available in Discord but are not editable there. Role price/availability edits use Save changes and Discard, and safe roles can be added at an individual Dex price.
+- Private economy command, component, and modal replies (including temporary purchase controls) are deleted after 60 seconds; persistent store, rules, leaderboard, and announcement messages are unaffected.
+- `/robuser` is available any time and requires one Robbingusertool per successful robbery; each robbery transfers at most 200 Dex and leaves the target at or above 50 Dex. Missing-tool guidance points members to `/shop` or `#store` before eligibility messaging, while duplicate attempts remain idempotent.
+- The Discord store is a categorized embed (Robbing, Protection, Daily & style, Server roles, More items) with grouped item buttons; it falls back to a select menu when buttons exceed Discord's five action rows or there are more than 20 items.
+- After migrations, `/economy on` repairs the existing Discord store message, seeds a missing default Robbingusertool, disables retired default Rob More rows, and uses the updated premium catalog presentation.
 
 ### API endpoints
 
@@ -226,6 +246,19 @@ The bot, API, and worker are separate long-lived processes sharing PostgreSQL an
 | PUT | `/guilds/:guildId/auto-roles` | Save and validate Auto Roles settings | Session + guild access |
 | POST | `/guilds/:guildId/auto-roles/test` | Send a saved test announcement, including its optional embed | Session + guild access; 3/min |
 | GET | `/guilds/:guildId/auto-roles/activity` | Last 20 automatic role outcomes | Session + guild access |
+<<<<<<< Updated upstream
+=======
+| GET | `/guilds/:guildId/auto-roles/diagnose` | Current Auto Roles readiness and recent outcomes | Session + guild access |
+| GET | `/guilds/:guildId/economy` | Economy status/settings | Session + guild access |
+| POST | `/guilds/:guildId/economy/enable` | Enable or repair economy channels/store | Session + guild access |
+| POST | `/guilds/:guildId/economy/disable` | Disable economy while retaining data | Session + guild access |
+| POST | `/guilds/:guildId/economy/pause` | Pause economy commands/buttons | Session + guild access |
+| POST | `/guilds/:guildId/economy/resume` | Resume economy commands/buttons | Session + guild access |
+| PUT | `/guilds/:guildId/economy/settings` | Validate and save economy settings | Session + guild access |
+| GET/POST/PUT/DELETE | `/guilds/:guildId/economy/items[/itemId]` | Manage economy store items | Session + guild access |
+| GET | `/guilds/:guildId/economy/roles` | List safe and unsafe role items | Session + guild access |
+| POST | `/guilds/:guildId/economy/delete-channels` | Confirmed economy-channel deletion; wallets remain | Session + guild access |
+>>>>>>> Stashed changes
 | PUT | `/guilds/:guildId/messages/:kind` | Save welcome/goodbye config | Session + guild access |
 | DELETE | `/guilds/:guildId/messages/:kind` | Reset welcome/goodbye config | Session + guild access |
 | POST | `/guilds/:guildId/messages/:kind/preview` | Render PNG preview (supports ETag) | Session + guild access |
@@ -279,7 +312,11 @@ Drizzle ORM plus PostgreSQL. All schema tables use Drizzle and are enabled for R
 | `mod_actions` | id, guild_id, moderator_id, target_id, action, reason, duration_seconds, created_at | No relations |
 | `auto_role_events` | id, guild_id, user_id, role_id, outcome, created_at | No relations; purged after 14 days |
 
+<<<<<<< Updated upstream
 Migrations: `backend/drizzle/0000_swift_white_tiger.sql`, `0001_guild_data.sql`, `0002_admin_operations.sql`, `0003_mod_actions.sql`, `0004_rls_policies_and_indexes.sql`, `0005_auto_roles.sql`, and `0006_auto_roles_defaults.sql`. Generate with `npm run db:generate`; migrate built output with `npm run db:migrate`. Migration 0005 uses idempotent DDL for additive columns, the activity table/index, and its RLS policy, so reruns tolerate objects that already exist; `IF NOT EXISTS` does not repair an existing object with the wrong definition. Migration 0006 updates only the `auto_roles` column default; it does not rewrite saved settings.
+=======
+Migrations: `backend/drizzle/0000_swift_white_tiger.sql` through `0012_store_catalog_copy.sql`, including economy migrations 0008-0012. Generate with `npm run db:generate`; migrate built output with `npm run db:migrate`. Migration 0005 uses idempotent DDL for additive columns, the activity table/index, and its RLS policy. Migration 0007 adds actual delay reporting and the `enqueue_failed`/`skipped_pending` outcome codes; legacy delay fields are normalized when settings are read. Migration 0011 raises old protection floors to at least 50 and disables default Rob More store items. Migration 0012 changes only exact known legacy descriptions on default store rows.
+>>>>>>> Stashed changes
 
 ### Auth, validation, guards, config, and middleware
 - Discord OAuth sessions are encrypted in Redis; session cookie name and settings are in `backend/src/auth/cookies.ts` and `session.service.ts`.
@@ -326,6 +363,7 @@ App Router under `frontend/src/app/`.
 | `/dashboard/[guildId]/welcome` | Welcome message/card editor |
 | `/dashboard/[guildId]/goodbye` | Goodbye message/card editor |
 | `/dashboard/[guildId]/auto-roles` | Auto-role settings with adaptive timing, member filters, optional announcement embed, shared native role dropdown, Discord-style preview, and recent activity |
+| `/dashboard/[guildId]/economy` | Economy enable/status and pause/resume controls; economy-specific loading skeleton; stage all economy, custom-role, and confirmed channel-deletion changes with animated Save/Discard |
 | `/dashboard/[guildId]/social` | Social preview/coming-not-enabled UI |
 | `/dashboard/[guildId]/music` | Music preview/coming-not-enabled UI |
 | `/dashboard/[guildId]/[kind]` | Validates `kind` against `welcome|goodbye` and mounts editor |
@@ -354,6 +392,8 @@ App Router under `frontend/src/app/`.
 - The Auto Roles dashboard reloads the config returned by the backend when navigating between guilds, rather than retaining the previous guild's draft. Backend normalization applies default embed title, description, and footer text when those values are missing or blank. Channel and activity fetch errors are shown explicitly rather than appearing as perpetual loading or empty activity. Saving updates the current RTK cache directly; connected guild dashboards also invalidate guild settings when an Auto Roles settings revision arrives over WebSocket.
 - Auto Roles always uses backend-calculated adaptive timing; the dashboard has no delay controls.
 - The role picker is left-aligned without a duplicate selected-role label; announcement channels use a simple select without a search field.
+- Economy store dashboard controls are limited to custom server roles. Built-in consumables remain in the Discord store but are not editable in the dashboard; custom role additions and price/availability drafts are staged together and committed with Save changes or reverted with Discard.
+- Economy enable/disable, pause/resume, role additions/price/availability/deletions, and confirmed channel deletion are staged behind one Save/Discard bar. Drafts warn before tab close; local/server price validation is inline and focused on submit; unsuccessful writes remain staged for correction or retry.
 - `src/lib/realtime.ts` provides native WebSocket live guild event handling.
 - `src/lib/site.ts`, `src/lib/seo.ts` hold public-site metadata; `src/lib/message-schema.ts` mirrors backend message validation.
 
@@ -383,6 +423,8 @@ Commands are guild-only and registered globally or per guild from `backend/scrip
 | `/unban` | Unban a user ID | `user_id` required 17–20 digits; `reason` optional, max 400 | BanMembers | `backend/src/bot/commands/unban.ts` |
 | `/timeout` | Timeout a member | `member` required; `duration` required choices 60/300/600/3600/86400/604800 seconds; `reason` optional | ModerateMembers | `backend/src/bot/commands/timeout.ts` |
 | `/untimeout` | Remove timeout | `member` required | ModerateMembers | `backend/src/bot/commands/untimeout.ts` |
+| `/reward`, `/balance`, `/shop`, `/store`, `/buy`, `/gift`, `/robuser`, `/leaderboard` | Economy member commands (`/store` aliases `/shop`) | Economy command options vary | Economy-commands channel | `backend/src/bot/commands/economy.ts` |
+| `/economy on|off|pause|resume|status|give|take|reset|help` | Economy owner/staff operations | Subcommands and options vary | Server owner or Administrator; economy-commands once configured | `backend/src/bot/commands/economy.ts` |
 
 Command handling, rate limit (20 moderation actions per moderator per guild per minute), DM notices, Discord audit reasons, and `mod_actions` inserts live in `backend/src/bot/moderation.service.ts`. Shared guard logic is in `backend/src/bot/commands/moderation.guard.ts`.
 
@@ -656,15 +698,16 @@ Use a fresh disposable Redis container for each E2E run. If reusing a test-only 
 ## 13. Known Issues / TODOs / Technical Debt
 - Public copy describes anti-spam, social notifications, AI chat, and auto moderation, but only moderation slash commands and welcome/goodbye configuration have complete repository implementations. Exact delivery/availability status should be confirmed.
 - Social and music dashboard pages render preview/disabled UI; they are not full feature implementations.
-- Auto moderation, economy, logging, and profile editing are marked coming soon/planned or absent.
+- Auto moderation, logging, and profile editing are marked coming soon/planned or absent.
 - `backend/.env.example` does not include `ALLOWED_WEB_ORIGINS`, although backend config accepts it.
 - `REDIS_PASSWORD` appears in backend `.env.example`, but application code uses `REDIS_URL` and does not directly read `REDIS_PASSWORD`; its deployment purpose is unclear.
 - The public README says anti-spam/social/AI are product features, but the code currently lacks corresponding complete backend modules/routes. This guide does not infer them as implemented.
 - Custom backgrounds are optional and disabled unless Supabase variables are configured.
 - Production API health can return 503 for an unhealthy dependency, and backend README notes it is unsuitable for Render restart health checks.
 - `backend/src/bot/commands/moderation.guard.ts` and `moderation.service.ts` enforce additional hierarchy/DM/permission behavior; see source before changing moderation rules.
+- Economy setup, wallets, role safety, REST APIs and slash commands live in `backend/src/economy/` and `backend/src/bot/economy-command.service.ts`; legacy window jobs are drained by `backend/src/economy/economy.queue.ts` and `backend/src/worker/economy-window.processor.ts`. Each robbery is capped at 200 Dex and the configured protection floor cannot be lower than 50 Dex.
 - Test artifacts/directories such as `frontend/test-results/` and `.next` may exist locally and should remain excluded from source tree understanding/build output.
-- No Docker Compose file or all-in-one local orchestration file is present.
+- The economy test harness provides an isolated `docker-compose.test.yml`; no general application orchestration file is present.
 - The backend E2E suite uses an embedded PostgreSQL instance and either spawns `redis-server` or connects to `DEXBOTX_E2E_REDIS_URL`; Docker Redis is the supported Windows fallback when the executable is unavailable.
 - The Drizzle journal includes migration `0005`, while `drizzle/meta/` has only the original snapshot; inspect migration metadata before running `db:generate` to avoid regenerating historical schema changes.
 - Auto Roles has helper, service, worker, API end-to-end, and focused dashboard component tests. API E2E covers successful test announcements and the 3/minute rate limit.
@@ -723,13 +766,26 @@ Use a fresh disposable Redis container for each E2E run. If reusing a test-only 
 | 2026-11-24 | Staged new economy role listings with custom role edits behind the Economy page Save changes/Discard bar, shown whenever the role form or existing listings are dirty | `frontend/src/app/dashboard/[guildId]/economy/page.tsx`; `frontend/src/app/dashboard/[guildId]/economy/page.spec.tsx`; dashboard section |
 | 2026-11-24 | Matched Economy loading and validation behavior to the message editors: add a route-specific skeleton, keep status visible during store loading, focus inline price errors, and retain drafts on failed saves | `frontend/src/app/dashboard/[guildId]/economy/loading.tsx`; `frontend/src/app/dashboard/[guildId]/economy/page.tsx`; `frontend/src/app/dashboard/[guildId]/economy/page.spec.tsx`; `frontend/src/components/dashboard/loading-skeleton.tsx`; frontend components section |
 | 2026-11-24 | Stage Economy enable/disable, pause/resume, custom-role deletion, and confirmed channel deletion with the same Save/Discard flow as role edits | `frontend/src/app/dashboard/[guildId]/economy/page.tsx`; `frontend/src/app/dashboard/[guildId]/economy/page.spec.tsx`; frontend route and components sections |
+<<<<<<< Updated upstream
+=======
+<<<<<<< Updated upstream
+=======
+>>>>>>> Stashed changes
 | 2026-11-24 | Matched the Economy Save changes/Discard action bar markup and animation styling to the Welcome and Goodbye editors | `frontend/src/app/dashboard/[guildId]/economy/page.tsx`; frontend route and components sections |
 | 2026-11-24 | Increased the Next.js API proxy timeout for Economy mutations to 60 seconds so Discord channel/message setup is not treated as a gateway timeout | `frontend/src/app/api/[[...path]]/route.ts`; `frontend/src/app/api/[[...path]]/route.spec.ts`; frontend API proxy section |
 | 2026-11-24 | Restricted backend and frontend CI pull requests to the `main` base branch; confirmed workflows do not deploy or push Docker images (Docker build uses `push: false`) | `.github/workflows/frontend-ci.yml`; `.github/workflows/backend-ci.yml`; GitHub Actions and deployment sections |
 | 2026-11-24 | Added Economy status and a direct settings link to the guild overview, including loading and API-unavailable states | `frontend/src/components/dashboard/overview-content.tsx`; `frontend/src/components/dashboard/overview-content.spec.tsx`; overview route and components sections |
 >>>>>>> Stashed changes
+<<<<<<< Updated upstream
 | 2026-11-24 | Restricted Vercel Git-triggered deployments to `main` and documented the branch policy | `frontend/vercel.json`; `frontend/README.md`; frontend folder structure and deployment sections |
 
 ## 15. Last updated
 
 2026-11-24
+=======
+>>>>>>> Stashed changes
+
+## 15. Last updated
+
+2026-11-21
+>>>>>>> Stashed changes
