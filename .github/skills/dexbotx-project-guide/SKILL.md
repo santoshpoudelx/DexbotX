@@ -155,6 +155,7 @@ The bot, API, and worker are separate long-lived processes sharing PostgreSQL an
 │   ├── package-lock.json
 │   ├── Dockerfile                    # Standalone Next.js container
 │   ├── .env.example                  # Frontend environment template
+│   ├── vercel.json                   # Vercel Git deployments restricted to main
 │   ├── next.config.mjs               # Standalone output, CSP, proxy/build settings
 │   ├── src/app/                      # Next App Router pages/routes
 │   │   └── dashboard/[guildId]/auto-roles/
@@ -727,7 +728,8 @@ Use a fresh disposable Redis container for each E2E run. If reusing a test-only 
 | 2026-11-24 | Restricted backend and frontend CI pull requests to the `main` base branch; confirmed workflows do not deploy or push Docker images (Docker build uses `push: false`) | `.github/workflows/frontend-ci.yml`; `.github/workflows/backend-ci.yml`; GitHub Actions and deployment sections |
 | 2026-11-24 | Added Economy status and a direct settings link to the guild overview, including loading and API-unavailable states | `frontend/src/components/dashboard/overview-content.tsx`; `frontend/src/components/dashboard/overview-content.spec.tsx`; overview route and components sections |
 >>>>>>> Stashed changes
+| 2026-11-24 | Restricted Vercel Git-triggered deployments to `main` and documented the branch policy | `frontend/vercel.json`; `frontend/README.md`; frontend folder structure and deployment sections |
 
 ## 15. Last updated
 
-2026-11-21
+2026-11-24
