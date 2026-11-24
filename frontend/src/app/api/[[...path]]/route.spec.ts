@@ -142,6 +142,24 @@ describe('API route proxy security header', () => {
     });
   });
 
+  it('allows Economy mutations up to 60 seconds for Discord setup work', async () => {
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+    vi.stubEnv('NODE_ENV', 'development');
+    vi.stubEnv('BACKEND_URL', 'http://localhost:4000');
+    vi.stubGlobal('fetch', fetchMock);
+
+    const response = await POST(new NextRequest('https://dexbotx.vercel.app/api/guilds/123/economy/enable', {
+      method: 'POST',
+    }), { params: Promise.resolve({ path: ['guilds', '123', 'economy', 'enable'] }) });
+
+    expect(response.status).toBe(200);
+    expect(timeoutSpy).toHaveBeenCalledWith(60_000);
+  });
+
   it('does not mask non-timeout backend connection failures', async () => {
     const fetchMock = vi.fn(async () => {
       throw new TypeError('Backend connection failed');
