@@ -5,13 +5,13 @@ import { DatabaseService } from '../db/database.service';
 import { economySettings, economyWallets, shopItems } from '../db/schema';
 import { DiscordApiError, DiscordRestService } from '../discord/discord-rest.service';
 import { RedisService } from '../redis/redis.service';
-import { defaultEconomySettings, economySettingsSchema } from './economy.schema';
+import { defaultEconomySettings, economySettingsSchema, type EconomySettings } from './economy.schema';
 import { formatCurrency } from './economy-format';
 
 const STORE_CATEGORIES = [
   { name: 'Robbing', kinds: ['rob_tool', 'bounty'] },
   { name: 'Protection', kinds: ['shield', 'decoy', 'lockpick'] },
-  { name: 'Daily & style', kinds: ['daily_boost', 'custom_title'] },
+  { name: 'Daily & style', kinds: ['daily_boost', 'custom_title', 'randomdex'] },
   { name: 'Server roles', kinds: ['role'] },
 ] as const;
 
@@ -23,8 +23,22 @@ const STORE_ITEM_EMOJI: Record<string, string> = {
   lockpick: '🗝️',
   daily_boost: '✨',
   custom_title: '🏷️',
+  randomdex: '🎲',
   role: '🏅',
 };
+
+const SETTINGS_L1_TTL_MS = 15_000;
+const SETTINGS_L1_MAX = 500;
+const CHANNEL_POST_SPACING_MS = 800;
+
+export type EconomyAnnouncementEvent =
+  | { type: 'bounty_placed'; targetUserId: string; amount: number }
+  | { type: 'bounty_claimed'; robberUserId: string; targetUserId: string; amount: number }
+  | { type: 'rob_success'; robberUserId: string; victimUserId: string; totalAmount: number }
+  | { type: 'role_purchase'; userId: string; itemName: string; price: number }
+  | { type: 'custom_title'; userId: string }
+  | { type: 'gift'; senderId: string; receiverId: string; amount: number }
+  | { type: 'streak_milestone'; userId: string; streakDay: number };
 
 function isOldMessageEditLimit(error: unknown): error is DiscordApiError {
   return error instanceof DiscordApiError
@@ -37,8 +51,14 @@ export class EconomyMessageService {
   private readonly logger = new Logger(EconomyMessageService.name);
   private readonly feedQueues = new Map<string, Promise<void>>();
   private readonly feedQueueLengths = new Map<string, number>();
+  private readonly lastPostAt = new Map<string, number>();
   private readonly syncTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly syncInflight = new Map<string, Promise<void>>();
+  private readonly settingsL1 = new Map<string, {
+    row: typeof economySettings.$inferSelect | undefined;
+    settings: EconomySettings;
+    expiresAt: number;
+  }>();
 
   constructor(
     private readonly database: DatabaseService,
@@ -46,12 +66,28 @@ export class EconomyMessageService {
     private readonly redis: RedisService,
   ) {}
 
-  private async settings(guildId: string) {
+  invalidateSettingsCache(guildId: string): void {
+    this.settingsL1.delete(guildId);
+  }
+
+  private async settings(guildId: string, bypassCache = false) {
+    if (!bypassCache) {
+      const hit = this.settingsL1.get(guildId);
+      if (hit && hit.expiresAt > Date.now()) {
+        return { row: hit.row, settings: hit.settings };
+      }
+    }
     const rows = await this.database.db.select().from(economySettings)
       .where(eq(economySettings.guildId, guildId)).limit(1);
     const row = rows[0];
     const parsed = row ? economySettingsSchema.safeParse(row.config) : undefined;
-    return { row, settings: parsed?.success ? parsed.data : defaultEconomySettings() };
+    const settings = parsed?.success ? parsed.data : defaultEconomySettings();
+    if (this.settingsL1.size >= SETTINGS_L1_MAX) {
+      const oldest = this.settingsL1.keys().next().value;
+      if (oldest) this.settingsL1.delete(oldest);
+    }
+    this.settingsL1.set(guildId, { row, settings, expiresAt: Date.now() + SETTINGS_L1_TTL_MS });
+    return { row, settings };
   }
 
   private async editOrReplaceMessage(
@@ -94,8 +130,10 @@ export class EconomyMessageService {
       const next = prev
         .catch(() => undefined)
         .then(async () => {
-          await this.updateStore(guildId);
-          await this.updateRules(guildId, guildName);
+          await Promise.all([
+            this.updateStore(guildId),
+            this.updateRules(guildId, guildName),
+          ]);
         })
         .catch((error: unknown) => {
           this.logger.warn(`Debounced store/rules sync failed guild=${guildId}: ${error instanceof Error ? error.message : String(error)}`);
@@ -109,6 +147,72 @@ export class EconomyMessageService {
     this.syncTimers.set(guildId, timer);
   }
 
+  /**
+   * Dynamic, optimized dispatcher for all Economy announcements.
+   * Respects guild announcement settings and never leaks anonymous actors (e.g., bounty posters).
+   */
+  async announceEvent(guildId: string, event: EconomyAnnouncementEvent): Promise<void> {
+    const { row, settings } = await this.settings(guildId);
+    if (!row?.enabled || row.paused) return;
+    const channelId = row.announcementsChannelId;
+    if (!channelId) return;
+
+    let payload: Record<string, unknown> | null = null;
+    switch (event.type) {
+      case 'bounty_placed':
+        payload = {
+          content: `<@${event.targetUserId}> someone put a bounty of ${formatCurrency(event.amount, settings)}!`,
+          allowed_mentions: { parse: [], users: [event.targetUserId] },
+        };
+        break;
+      case 'bounty_claimed':
+        payload = {
+          content: `<@${event.robberUserId}> claimed ${formatCurrency(event.amount, settings)} by robbing <@${event.targetUserId}>.`,
+          allowed_mentions: { parse: [] },
+        };
+        break;
+      case 'rob_success':
+        payload = {
+          content: `<@${event.robberUserId}> robbed <@${event.victimUserId}> ${formatCurrency(event.totalAmount, settings)} 😂`,
+          allowed_mentions: { parse: [] },
+        };
+        break;
+      case 'role_purchase':
+        if (!settings.announcementEvents.rolePurchases) return;
+        payload = {
+          content: `<@${event.userId}> purchased **${event.itemName}** (${formatCurrency(event.price, settings)}).`,
+          allowed_mentions: { parse: [] },
+        };
+        break;
+      case 'custom_title':
+        if (!settings.announcementEvents.customTitles) return;
+        payload = {
+          content: `<@${event.userId}> set a Custom Title.`,
+          allowed_mentions: { parse: [] },
+        };
+        break;
+      case 'gift':
+        if (!settings.announcementEvents.gifts) return;
+        payload = {
+          content: `<@${event.senderId}> sent ${formatCurrency(event.amount, settings)} to <@${event.receiverId}>.`,
+          allowed_mentions: { parse: [] },
+        };
+        break;
+      case 'streak_milestone':
+        if (!settings.announcementEvents.streakMilestones) return;
+        payload = {
+          content: `<@${event.userId}> reached a ${event.streakDay}-day daily streak!`,
+          allowed_mentions: { parse: [] },
+        };
+        break;
+    }
+
+    if (!payload) return;
+    await this.enqueueDiscordPost(channelId, payload).catch((error: unknown) => {
+      this.logger.warn(`Economy announcement (${event.type}) failed guild=${guildId}: ${error instanceof Error ? error.message : String(error)}`);
+    });
+  }
+
   async postFeed(guildId: string, text: string) {
     const { row } = await this.settings(guildId);
     if (!row?.enabled || row.paused) return;
@@ -120,16 +224,7 @@ export class EconomyMessageService {
   }
 
   async postBountyAnnouncement(guildId: string, amount: number, targetUserId: string) {
-    const { row, settings } = await this.settings(guildId);
-    if (!row?.enabled || row.paused) return;
-    const channelId = row.announcementsChannelId;
-    if (!channelId) return;
-    await this.enqueueDiscordPost(channelId, {
-      content: `${formatCurrency(amount, settings)} bounty has been set on <@${targetUserId}>.`,
-      allowed_mentions: { parse: [] },
-    }).catch((error: unknown) => {
-      this.logger.warn(`Bounty announcement failed guild=${guildId}: ${error instanceof Error ? error.message : String(error)}`);
-    });
+    await this.announceEvent(guildId, { type: 'bounty_placed', amount, targetUserId });
   }
 
   async postBountyClaimAnnouncement(
@@ -138,16 +233,16 @@ export class EconomyMessageService {
     amount: number,
     targetUserId: string,
   ) {
-    const { row, settings } = await this.settings(guildId);
-    if (!row?.enabled || row.paused) return;
-    const channelId = row.announcementsChannelId;
-    if (!channelId) return;
-    await this.enqueueDiscordPost(channelId, {
-      content: `<@${robberUserId}> claimed ${formatCurrency(amount, settings)} by robbing <@${targetUserId}>.`,
-      allowed_mentions: { parse: [] },
-    }).catch((error: unknown) => {
-      this.logger.warn(`Bounty claim announcement failed guild=${guildId}: ${error instanceof Error ? error.message : String(error)}`);
-    });
+    await this.announceEvent(guildId, { type: 'bounty_claimed', robberUserId, amount, targetUserId });
+  }
+
+  async postRobSuccessAnnouncement(
+    guildId: string,
+    robberUserId: string,
+    victimUserId: string,
+    totalAmount: number,
+  ) {
+    await this.announceEvent(guildId, { type: 'rob_success', robberUserId, victimUserId, totalAmount });
   }
 
   async postHeist(guildId: string, text: string, victimUserId?: string) {
@@ -174,11 +269,16 @@ export class EconomyMessageService {
     const next = previous
       .catch(() => undefined)
       .then(async () => {
-        await new Promise((resolve) => setTimeout(resolve, 800));
+        const elapsed = Date.now() - (this.lastPostAt.get(channelId) ?? 0);
+        const waitMs = Math.max(0, CHANNEL_POST_SPACING_MS - elapsed);
+        if (waitMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, waitMs));
+        }
         let attempts = 0;
         while (attempts < 5) {
           try {
             await this.discord.createChannelMessage(channelId, payload);
+            this.lastPostAt.set(channelId, Date.now());
             return;
           } catch (error) {
             attempts++;
@@ -204,19 +304,19 @@ export class EconomyMessageService {
   }
 
   async updateRules(guildId: string, guildName: string) {
-    const { row, settings } = await this.settings(guildId);
+    const { row, settings } = await this.settings(guildId, true);
     if (!row?.rulesChannelId) return;
     const items = await this.database.db.select().from(shopItems)
       .where(and(eq(shopItems.guildId, guildId), eq(shopItems.enabled, true))).orderBy(shopItems.sortOrder);
     const embeds = [
       { title: 'Start here', description: `Welcome to ${settings.economyName} for ${guildName}. Earn ${settings.currencyName}, spend in the store and rob members any time with a Robbingusertool. Go to <#${row.commandsChannelId ?? ''}> and use /reward.`, color: 0x5865f2 },
-      { title: 'All commands', description: '/reward, /balance, /shop, /store, /buy, /robuser, /gift and /leaderboard. Economy commands only work in economy-commands.', color: 0x5865f2 },
+      { title: 'All commands', description: '/reward, /balance, /shop, /store, /buy, /robuser, /senddex, /gift and /leaderboard. Economy commands only work in economy-commands.', color: 0x5865f2 },
       { title: 'Daily rewards and streaks', description: `Use /reward once per local day. Day 1 gives ${formatCurrency(settings.dailyAmount, settings)}. The streak can grow by ${formatCurrency(settings.streakStep, settings)} per day, up to ${settings.streakCapDays} days.`, color: 0x5865f2 },
       { title: 'Robbing', description: `Use /robuser any time. A Robbingusertool costs 400 ${settings.currencyName}, allows one successful robbery of up to ${formatCurrency(200, settings)}, and is consumed after success. No member can be robbed below ${formatCurrency(Math.max(50, settings.protectionThreshold), settings)}.`, color: 0x5865f2 },
       { title: 'The store', description: items.length
         ? items.map((item) => `**${item.name}:** ${formatCurrency(item.price, settings)} — ${item.description || item.kind}`).join('\n').slice(0, 4096)
         : 'No store items are enabled.', color: 0x5865f2 },
-      { title: 'Gifts and fair play', description: `Send up to ${formatCurrency(settings.weeklyGiftSendLimit, settings)} each week and receive up to ${formatCurrency(settings.weeklyGiftReceiveLimit, settings)}. Staff changes are logged.`, color: 0x5865f2 },
+      { title: 'Transfers and fair play', description: `Send any amount of ${settings.currencyName} from your vault with /senddex, or use /gift (up to ${formatCurrency(settings.weeklyGiftSendLimit, settings)} weekly). Staff changes are logged.`, color: 0x5865f2 },
     ];
     const hash = createHash('sha256').update(JSON.stringify(embeds)).digest('hex');
     const changed = row.rulesHash !== hash;
@@ -241,13 +341,14 @@ export class EconomyMessageService {
     }
     await this.database.db.update(economySettings).set({ rulesMessageIds: ids, rulesHash: hash })
       .where(eq(economySettings.guildId, guildId));
+    this.invalidateSettingsCache(guildId);
     for (const messageId of supersededMessages) {
       await this.deleteSupersededMessage(row.rulesChannelId, messageId);
     }
   }
 
   async updateStore(guildId: string) {
-    const { row, settings } = await this.settings(guildId);
+    const { row, settings } = await this.settings(guildId, true);
     if (!row?.storeChannelId) return;
     const items = await this.database.db.select().from(shopItems)
       .where(and(eq(shopItems.guildId, guildId), eq(shopItems.enabled, true))).orderBy(shopItems.sortOrder);
@@ -337,6 +438,7 @@ export class EconomyMessageService {
       if (result.messageId === row.storeMessageId) return;
       await this.database.db.update(economySettings).set({ storeMessageId: result.messageId })
         .where(eq(economySettings.guildId, guildId));
+      this.invalidateSettingsCache(guildId);
       if (result.supersededMessageId) {
         await this.deleteSupersededMessage(row.storeChannelId, result.supersededMessageId);
       }
@@ -345,6 +447,7 @@ export class EconomyMessageService {
     const created = await this.discord.createChannelMessage(row.storeChannelId, payload);
     await this.database.db.update(economySettings).set({ storeMessageId: created.id })
       .where(eq(economySettings.guildId, guildId));
+    this.invalidateSettingsCache(guildId);
   }
 
   async refreshLeaderboard(guildId: string) {
@@ -374,6 +477,7 @@ export class EconomyMessageService {
     const created = await this.discord.createChannelMessage(row.leaderboardChannelId, payload);
     await this.database.db.update(economySettings).set({ leaderboardMessageId: created.id })
       .where(eq(economySettings.guildId, guildId));
+    this.invalidateSettingsCache(guildId);
   }
 
   async updateRobbingInfo(guildId: string) {
@@ -392,6 +496,7 @@ export class EconomyMessageService {
     await this.discord.pinChannelMessage(row.announcementsChannelId, created.id);
     await this.database.db.update(economySettings).set({ countdownMessageId: created.id })
       .where(eq(economySettings.guildId, guildId));
+    this.invalidateSettingsCache(guildId);
   }
 
   async repairAll(guildId: string) {

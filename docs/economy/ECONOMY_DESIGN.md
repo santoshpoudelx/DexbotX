@@ -16,7 +16,9 @@ This document describes the current economy behavior. The original project audit
 - Daily Boost now adds a flat bonus instead of replacing the amount, so it works with the streak.
 - Robbery items take effect immediately and use charges instead of window timers.
 - Gifts are always available, with weekly send and receive limits.
-- Roles with dangerous permissions can never be sold (no override).
+- `/senddex` transfers Dex directly from one vault to another without gift limits or a protection floor.
+- `/get5kdex` is restricted to one allowlisted testing account and grants 5,000 Dex.
+- Store role items may use any non-managed role below the bot's highest role, including roles with powerful permissions.
 - A full anti-exploit table was added (section 8) and settings have hard minimum and maximum values (section 11).
 
 ## 1. Overview
@@ -86,6 +88,7 @@ If the owner never edits the store, this is what members see. Prices are chosen 
 | Decoy | 90 Dex | Stops one attempt without consuming the robber's tool | One attempt |
 | Shield | 150 Dex | Blocks two robbery attempts | Two charges |
 | Daily Boost | 150 Dex | +25 Dex on every daily reward | 7 days |
+| RandomDex | 50 Dex | Adds a random 1–100 Dex payout to your vault | Instant |
 | Lockpick | 180 Dex | Bypass one Shield charge on a successful robbery. Does not bypass a Decoy. | One success |
 | Custom Title | 250 Dex | Short title shown next to your name on the leaderboard | Permanent |
 | Bronze Member | 400 Dex | Cosmetic role | Permanent |
@@ -105,9 +108,8 @@ Default roles:
 
 ### 3c. Role items added by the owner
 
-- Nothing is automatic. The owner picks a safe role by hand and sets its Dex price. The dashboard supplies its listing description and supports enabling, disabling or deleting the custom role item.
-- The picker lists only roles below the bot's own role.
-- Roles with any of these permissions can never be sold, with no confirm step and no override: Administrator, Manage Server, Manage Roles, Manage Channels, Manage Webhooks, Ban Members, Kick Members, Moderate Members, Manage Messages, Mention Everyone. Unsafe roles are unavailable in the picker.
+- Nothing is automatic. The owner picks a role by hand and sets its Dex price. The dashboard supplies its listing description and supports enabling, disabling or deleting the custom role item.
+- The picker lists only non-managed roles strictly below the bot's own role, excluding @everyone. Roles with powerful permissions are allowed.
 - If an item is removed later, members who already bought the role keep it. Only the store listing disappears.
 - Purchase order: check the member does not already own the role (no charge if they do), take Dex inside a database transaction, assign the role, and if assigning fails, refund the Dex and log it. A member can never lose Dex without getting the role.
 
@@ -182,6 +184,8 @@ Member commands:
 | /buy item | Buy an item by name (with autocomplete) |
 | /robuser user | Try to rob a member. Requires a Robbingusertool and works any time. |
 | /gift user amount | Send Dex to someone |
+| /senddex user amount | Transfer any amount of Dex from your vault; no weekly gift limits or protection floor apply. |
+| /get5kdex | Testing command that adds 5,000 Dex to the allowlisted account's vault. |
 | /leaderboard | Show the top 10 and your own rank privately |
 | /economy help | Short guide and a link to economy-rules |
 

@@ -489,7 +489,7 @@ function EconomyEditor({
           </div>
         )}
         {rolesData?.roles.some((role) => role.reason) && (
-          <p className="mb-3 text-xs text-muted-foreground">Roles that the bot cannot safely assign are unavailable for purchase.</p>
+          <p className="mb-3 text-xs text-muted-foreground">Roles positioned at or above DexBotX’s highest role are hidden until DexBotX’s role is moved higher in Discord. Bot and integration roles are automatically filtered out.</p>
         )}
         {rolesError && (
           <div className="mb-3 flex flex-wrap items-center gap-2 text-sm" role="alert">
@@ -502,29 +502,33 @@ function EconomyEditor({
         <form className="mb-5 grid gap-4 rounded-lg border border-border p-4 sm:grid-cols-[1fr_180px_auto] sm:items-end" aria-labelledby="economy-add-role-heading" noValidate onSubmit={stageRole}>
           <div className="sm:col-span-3">
             <h3 id="economy-add-role-heading" className="text-sm font-medium">Add a purchasable server role</h3>
-            <p className="mt-1 text-xs text-muted-foreground">Choose a safe server role and set its price in Dex. The store message updates when you add it.</p>
+            <p className="mt-1 text-xs text-muted-foreground">Add any server role below DexBotX’s highest role (including manager or staff roles) and set its price in Dex. Bot roles are automatically filtered out.</p>
           </div>
           <Field label="Server role" htmlFor="economy-role-id">
-            <Select
-              id="economy-role-id"
-              name="roleId"
-              required
-              value={roleId}
-              aria-invalid={!!fieldIssue(roleCreationIssues, 'roleId')}
-              aria-describedby={fieldIssue(roleCreationIssues, 'roleId') ? 'economy-role-id-error' : undefined}
-              disabled={savingChanges || rolesLoading || itemsLoading || !!rolesError || !!itemsError || availableRoles.length === 0}
-              onChange={(event) => {
-                setRoleId(event.target.value);
-                setRoleCreationIssues((current) => {
-                  const next = { ...current };
-                  delete next.roleId;
-                  return next;
-                });
-              }}
-            >
-              <option value="" disabled>Choose a role</option>
-              {availableRoles.map((role) => <option key={role.id} value={role.id}>{role.name}</option>)}
-            </Select>
+            {rolesLoading ? (
+              <Skeleton className="h-10 w-full rounded-lg" />
+            ) : (
+              <Select
+                id="economy-role-id"
+                name="roleId"
+                required
+                value={roleId}
+                aria-invalid={!!fieldIssue(roleCreationIssues, 'roleId')}
+                aria-describedby={fieldIssue(roleCreationIssues, 'roleId') ? 'economy-role-id-error' : undefined}
+                disabled={savingChanges || itemsLoading || !!rolesError || !!itemsError || availableRoles.length === 0}
+                onChange={(event) => {
+                  setRoleId(event.target.value);
+                  setRoleCreationIssues((current) => {
+                    const next = { ...current };
+                    delete next.roleId;
+                    return next;
+                  });
+                }}
+              >
+                <option value="" disabled>{availableRoles.length === 0 ? 'No eligible roles below DexBotX' : 'Choose a role'}</option>
+                {availableRoles.map((role) => <option key={role.id} value={role.id}>{role.name}</option>)}
+              </Select>
+            )}
             {fieldIssue(roleCreationIssues, 'roleId') && (
               <p id="economy-role-id-error" className="mt-1 text-xs text-destructive">
                 {fieldIssue(roleCreationIssues, 'roleId')}

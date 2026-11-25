@@ -12,7 +12,7 @@ import type { RealtimeStatus } from '@/lib/realtime';
 import { useGetMeQuery } from '@/store/api';
 import { MobileNav } from './mobile-nav';
 
-export function DashboardTopBar({ guildId, guild, lastSyncedLabel, refreshing, cooldownSeconds, onRefresh, realtimeStatus }: { guildId?: string; guild?: GuildDetail; lastSyncedLabel?: string; refreshing?: boolean; cooldownSeconds?: number; onRefresh?: () => void; realtimeStatus?: RealtimeStatus }) {
+export function DashboardTopBar({ guildId, guild, lastSyncedLabel, refreshing, cooldownSeconds, onRefresh }: { guildId?: string; guild?: GuildDetail; lastSyncedLabel?: string; refreshing?: boolean; cooldownSeconds?: number; onRefresh?: () => void; realtimeStatus?: RealtimeStatus }) {
   const { data: me, isLoading: loadingMe } = useGetMeQuery();
   return (
     <header className="sticky top-0 z-30 h-14 border-b border-border bg-surface">
@@ -41,15 +41,6 @@ export function DashboardTopBar({ guildId, guild, lastSyncedLabel, refreshing, c
           ) : guildId ? (
             <Skeleton className="hidden size-11 shrink-0 sm:block" />
           ) : null}
-          {guildId && (
-            <span className="flex items-center gap-1.5 text-xs text-muted-foreground" role="status" aria-live="polite">
-              <span
-                aria-hidden="true"
-                className={`size-2 rounded-full ${realtimeStatus === 'live' ? 'bg-success' : 'bg-warning animate-pulse motion-reduce:animate-none'}`}
-              />
-              {realtimeStatus === 'live' ? 'Live' : 'Reconnecting'}
-            </span>
-          )}
           <ThemeToggle />
           {me ? <UserMenu me={me as Me} /> : loadingMe ? <Skeleton className="h-11 w-11 shrink-0 sm:w-28" /> : null}
         </div>

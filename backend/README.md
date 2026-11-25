@@ -40,6 +40,9 @@ Run each process in a separate terminal:
 npm run start:dev
 npm run start:bot:dev
 npm run start:worker:dev
+
+ npm run commands:deploy to deploye new command to global discord 
+ npm run commands:deploy -- --guild <server-id> to specific server 
 ```
 
 The API listens on port `4000` by default. Configure the frontend's `BACKEND_URL` to this API for local development.

@@ -84,7 +84,11 @@ describe('BotService auto-role scheduling', () => {
 });
 
 describe('BotService economy interaction acknowledgement', () => {
-  async function dispatchEconomyCommand(deferReply: jest.Mock, onHandle: () => Promise<void> = async () => undefined) {
+  async function dispatchEconomyCommand(
+    deferReply: jest.Mock,
+    onHandle: () => Promise<void> = async () => undefined,
+    isUserSelectMenu = false,
+  ) {
     const listeners = new Map<string, (...args: unknown[]) => void>();
     const client = {
       once: jest.fn(),
@@ -92,7 +96,10 @@ describe('BotService economy interaction acknowledgement', () => {
       login: jest.fn().mockResolvedValue('token'),
       destroy: jest.fn().mockResolvedValue(undefined),
     };
-    const economyCommands = { handle: jest.fn(onHandle) };
+    const economyCommands = {
+      handle: jest.fn(onHandle),
+      handleSelectMenu: jest.fn(onHandle),
+    };
     const service = new BotService(
       { discordBotToken: 'test-token' } as never,
       {} as never,
@@ -118,9 +125,10 @@ describe('BotService economy interaction acknowledgement', () => {
       createdTimestamp: Date.now() - 50,
       deferred: false,
       replied: false,
-      isChatInputCommand: () => true,
+      isChatInputCommand: () => !isUserSelectMenu,
       isButton: () => false,
       isStringSelectMenu: () => false,
+      isUserSelectMenu: () => isUserSelectMenu,
       isModalSubmit: () => false,
       isAutocomplete: () => false,
       deferReply,
@@ -150,5 +158,11 @@ describe('BotService economy interaction acknowledgement', () => {
 
     expect(economyCommands.handle).not.toHaveBeenCalled();
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('expired before acknowledgement'));
+  });
+
+  it('dispatches user-select menu interactions to the economy component handler', async () => {
+    const { economyCommands } = await dispatchEconomyCommand(jest.fn(), undefined, true);
+
+    expect(economyCommands.handleSelectMenu).toHaveBeenCalledTimes(1);
   });
 });

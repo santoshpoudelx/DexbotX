@@ -18,6 +18,7 @@ const DEFAULT_STORE = [
   ['lockpick', 'Lockpick', 'Bypass one Shield charge on a successful robbery, but not a Decoy.', 180],
   ['bounty', 'Bounty Poster', 'Set a reward paid to whoever successfully robs your target.', 50],
   ['custom_title', 'Custom Title', 'A short title shown next to your leaderboard name.', 250],
+  ['randomdex', 'RandomDex', 'Costs 50 Dex for a random payout up to 100 Dex.', 50],
 ] as const;
 
 const DEFAULT_ROLES = [
@@ -104,13 +105,37 @@ export class EconomySetupService {
     return `guild:${guildId}:economy-state`;
   }
 
+  private itemsCacheKey(guildId: string): string {
+    return `guild:${guildId}:economy-items`;
+  }
+
+  async getItems(guildId: string) {
+    const key = this.itemsCacheKey(guildId);
+    const cached = await this.redis.client.get(key).catch(() => null);
+    if (cached) {
+      try {
+        return JSON.parse(cached) as Array<typeof shopItems.$inferSelect>;
+      } catch {
+        // Fall through to DB read
+      }
+    }
+    const items = await this.database.db.select().from(shopItems)
+      .where(eq(shopItems.guildId, guildId)).orderBy(shopItems.sortOrder);
+    await this.redis.client.set(key, JSON.stringify(items), 'EX', 60).catch(() => undefined);
+    return items;
+  }
+
   async invalidateCache(guildId: string): Promise<void> {
-    await this.redis.client.del(this.economyCacheKey(guildId)).catch(() => undefined);
-    const rev = await this.redis.client.incr(`guild:${guildId}:rev`).catch(() => 0);
-    await this.redis.client.publish(
-      `guild:${guildId}:events`,
-      JSON.stringify({ type: 'updated', guildId, kind: 'economy', data: {}, rev }),
-    ).catch(() => undefined);
+    this.messages.invalidateSettingsCache?.(guildId);
+    await Promise.all([
+      this.redis.client.del(this.economyCacheKey(guildId), this.itemsCacheKey(guildId)).catch(() => undefined),
+      this.redis.client.incr(`guild:${guildId}:rev`).then((rev) =>
+        this.redis.client.publish(
+          `guild:${guildId}:events`,
+          JSON.stringify({ type: 'updated', guildId, kind: 'economy', data: {}, rev }),
+        ),
+      ).catch(() => undefined),
+    ]);
   }
 
   async get(guildId: string): Promise<{ settings: EconomySettings; state: EconomyStatus } | null> {
@@ -123,14 +148,16 @@ export class EconomySetupService {
         // Ignore malformed cache
       }
     }
-    const rows = await this.database.db.select().from(economySettings).where(eq(economySettings.guildId, guildId)).limit(1);
+    const [rows, countRows] = await Promise.all([
+      this.database.db.select().from(economySettings).where(eq(economySettings.guildId, guildId)).limit(1),
+      this.database.db
+        .select({ count: sql<number>`count(*)::int` })
+        .from(economyWallets)
+        .where(eq(economyWallets.guildId, guildId)),
+    ]);
     if (!rows[0]) return null;
     const parsed = economySettingsSchema.safeParse(rows[0].config);
     const settings = parsed.success ? parsed.data : defaultEconomySettings();
-    const countRows = await this.database.db
-      .select({ count: sql<number>`count(*)::int` })
-      .from(economyWallets)
-      .where(eq(economyWallets.guildId, guildId));
     const count = countRows[0]?.count ?? 0;
     const result = { settings, state: await this.status(guildId, count, rows[0]) };
     await this.redis.client.set(cacheKey, JSON.stringify(result), 'EX', 60).catch(() => undefined);
@@ -283,7 +310,7 @@ export class EconomySetupService {
       });
 
       if (!before[0]?.defaultsSeeded) await this.seedDefaults(guildId);
-      await this.seedRobbingUserTool(guildId);
+      await Promise.all([this.seedRobbingUserTool(guildId), this.seedRandomDex(guildId)]);
       await this.database.db.update(shopItems).set({ enabled: false }).where(and(
         eq(shopItems.guildId, guildId),
         eq(shopItems.kind, 'rob_more'),
@@ -347,19 +374,23 @@ export class EconomySetupService {
     const existing = await this.database.db.select().from(economySettings).where(eq(economySettings.guildId, guildId)).limit(1);
     await this.database.db.update(economySettings).set({ config: parsed, updatedAt: new Date() }).where(eq(economySettings.guildId, guildId));
     await this.database.db.insert(economyAuditLog).values({ guildId, actorId, source: 'dashboard', action: 'economy.settings.update', after: parsed as unknown as Record<string, unknown> });
-    if (existing[0]?.categoryId) {
-      await this.discord.editGuildChannel(existing[0].categoryId, { name: parsed.economyName }).catch((err) => {
-        this.logger.warn(`Failed to rename economy category for guild=${guildId}: ${(err as Error).message}`);
-      });
-    }
-    const resolvedName = guildName ?? (existing[0]?.guildId ? (await this.discord.getGuildAsBot(guildId).catch(() => ({ name: 'Server' }))).name : 'Server');
-    await Promise.allSettled([
-      this.messages.updateRules(guildId, resolvedName),
-      this.messages.updateStore(guildId),
-      this.messages.refreshLeaderboard(guildId),
-      this.messages.updateRobbingInfo(guildId),
-    ]);
     await this.invalidateCache(guildId);
+    void (async () => {
+      if (existing[0]?.categoryId) {
+        await this.discord.editGuildChannel(existing[0].categoryId, { name: parsed.economyName }).catch((err) => {
+          this.logger.warn(`Failed to rename economy category for guild=${guildId}: ${(err as Error).message}`);
+        });
+      }
+      const resolvedName = guildName ?? (existing[0]?.guildId ? (await this.discord.getGuildAsBot(guildId).catch(() => ({ name: 'Server' }))).name : 'Server');
+      await Promise.allSettled([
+        this.messages.updateRules(guildId, resolvedName),
+        this.messages.updateStore(guildId),
+        this.messages.refreshLeaderboard(guildId),
+        this.messages.updateRobbingInfo(guildId),
+      ]);
+    })().catch((err: unknown) => {
+      this.logger.warn(`Background economy settings sync failed guild=${guildId}: ${err instanceof Error ? err.message : String(err)}`);
+    });
   }
 
   async status(guildId: string, walletCount = 0, row?: typeof economySettings.$inferSelect): Promise<EconomyStatus> {
@@ -471,6 +502,24 @@ export class EconomySetupService {
   private async seedRobbingUserTool(guildId: string) {
     const item = DEFAULT_STORE.find(([itemId]) => itemId === 'rob_tool');
     if (!item) throw new Error('Default Robbingusertool is missing.');
+    const index = DEFAULT_STORE.indexOf(item);
+    const [itemId, name, description, price] = item;
+    await this.database.db.insert(shopItems).values({
+      guildId,
+      itemId,
+      kind: itemId,
+      name,
+      description,
+      price,
+      enabled: true,
+      isDefault: true,
+      sortOrder: index,
+    }).onConflictDoNothing();
+  }
+
+  private async seedRandomDex(guildId: string) {
+    const item = DEFAULT_STORE.find(([itemId]) => itemId === 'randomdex');
+    if (!item) return;
     const index = DEFAULT_STORE.indexOf(item);
     const [itemId, name, description, price] = item;
     await this.database.db.insert(shopItems).values({

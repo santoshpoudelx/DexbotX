@@ -1,3 +1,4 @@
+import { randomInt } from 'node:crypto';
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { and, eq, gt, inArray, isNull, or, sql } from 'drizzle-orm';
 import { DatabaseService, type Db } from '../db/database.service';
@@ -120,6 +121,118 @@ export class WalletService {
         remainingWindows: 1,
       });
       return { name: item.name, price: item.price };
+    });
+  }
+
+  async purchaseRandomDex(guildId: string, userId: string, itemId: string) {
+    return this.database.db.transaction(async (tx) => {
+      const items = await tx.select().from(shopItems)
+        .where(and(
+          eq(shopItems.guildId, guildId),
+          eq(shopItems.itemId, itemId),
+          eq(shopItems.kind, 'randomdex'),
+          eq(shopItems.enabled, true),
+        )).for('update').limit(1);
+      const item = items[0];
+      if (!item) throw new BadRequestException('That item is not available.');
+      if (item.stock !== null && item.stock <= 0) throw new BadRequestException('That item is out of stock.');
+
+      await this.ensureWallet(tx, guildId, userId);
+      const charged = await tx.update(economyWallets).set({
+        balance: sql`${economyWallets.balance} - ${item.price}`,
+        updatedAt: new Date(),
+      }).where(and(
+        eq(economyWallets.guildId, guildId),
+        eq(economyWallets.userId, userId),
+        sql`${economyWallets.balance} >= ${item.price}`,
+      )).returning();
+      if (!charged[0]) {
+        throw new InsufficientCoinsError(`You do not have enough Dex to purchase ${item.name}.`);
+      }
+
+      if (item.stock !== null) {
+        const stocked = await tx.update(shopItems).set({
+          stock: sql`${shopItems.stock} - 1`,
+        }).where(and(
+          eq(shopItems.guildId, guildId),
+          eq(shopItems.itemId, itemId),
+          gt(shopItems.stock, 0),
+        )).returning({ id: shopItems.id });
+        if (!stocked[0]) throw new BadRequestException('That item is out of stock.');
+      }
+
+      const reward = randomInt(1, 101);
+      const credited = await tx.update(economyWallets).set({
+        balance: sql`${economyWallets.balance} + ${reward}`,
+        totalEarned: sql`${economyWallets.totalEarned} + ${reward}`,
+        updatedAt: new Date(),
+      }).where(and(
+        eq(economyWallets.guildId, guildId),
+        eq(economyWallets.userId, userId),
+      )).returning();
+
+      await tx.insert(economyTransactions).values([
+        { guildId, userId, type: 'purchase', amount: item.price, note: item.name },
+        { guildId, userId, type: 'randomdex_reward', amount: reward, note: `${item.name} payout` },
+      ]);
+
+      return {
+        name: item.name,
+        price: item.price,
+        reward,
+        net: reward - item.price,
+        balance: credited[0]?.balance ?? (charged[0].balance + reward),
+      };
+    });
+  }
+
+  async sendDex(guildId: string, senderId: string, receiverId: string, amount: number, now = new Date()) {
+    if (senderId === receiverId) throw new BadRequestException('You cannot send Dex to yourself.');
+    if (!Number.isSafeInteger(amount) || amount <= 0) {
+      throw new BadRequestException('Amount must be a positive whole number.');
+    }
+    const orderedIds = [senderId, receiverId].sort();
+    return this.database.db.transaction(async (tx) => {
+      await this.ensureWallet(tx, guildId, senderId);
+      await this.ensureWallet(tx, guildId, receiverId);
+      await tx.select({ userId: economyWallets.userId }).from(economyWallets)
+        .where(and(eq(economyWallets.guildId, guildId), inArray(economyWallets.userId, orderedIds)))
+        .orderBy(economyWallets.userId)
+        .for('update');
+
+      const senderUpdate = await tx.update(economyWallets).set({
+        balance: sql`${economyWallets.balance} - ${amount}`,
+        updatedAt: now,
+      }).where(and(
+        eq(economyWallets.guildId, guildId),
+        eq(economyWallets.userId, senderId),
+        sql`${economyWallets.balance} >= ${amount}`,
+      )).returning();
+      if (!senderUpdate[0]) {
+        const sender = await this.getWallet(tx, guildId, senderId);
+        throw new InsufficientCoinsError(
+          `You do not have enough Dex in your vault. Your current balance is ${sender?.balance ?? 0} Dex.`,
+        );
+      }
+
+      const receiverUpdate = await tx.update(economyWallets).set({
+        balance: sql`${economyWallets.balance} + ${amount}`,
+        totalEarned: sql`${economyWallets.totalEarned} + ${amount}`,
+        updatedAt: now,
+      }).where(and(
+        eq(economyWallets.guildId, guildId),
+        eq(economyWallets.userId, receiverId),
+      )).returning();
+
+      await tx.insert(economyTransactions).values([
+        { guildId, userId: senderId, type: 'transfer_sent', amount, otherUserId: receiverId },
+        { guildId, userId: receiverId, type: 'transfer_received', amount, otherUserId: senderId },
+      ]);
+
+      return {
+        senderBalance: senderUpdate[0].balance,
+        receiverBalance: receiverUpdate[0]?.balance ?? amount,
+      };
     });
   }
 
