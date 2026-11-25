@@ -82,6 +82,7 @@ describe('EconomyMessageService bounty announcements', () => {
       const items = [
         storeItem('rob-tool', 'rob_tool', 'Robbingusertool', 400, 'One success, capped at 200.'),
         storeItem('shield', 'shield', 'Shield', 150, 'Blocks two robbery attempts.'),
+        storeItem('title-item', 'custom_title', 'Custom Title', 250, 'Set a leaderboard title.'),
         storeItem('bronze-role', 'role', 'Bronze Member', 400, 'A cosmetic role.'),
       ];
       const { service, discord } = createService(items);
@@ -93,11 +94,21 @@ describe('EconomyMessageService bounty announcements', () => {
         components: Array<{ components: Array<{ custom_id: string; label: string }> }>;
       };
       expect(payload.embeds[0].title).toBe('Dex Economy | Store');
-      expect(payload.embeds[0].fields.map((field) => field.name)).toEqual(['Robbing', 'Protection', 'Server roles']);
+      expect(payload.embeds[0].fields.map((field) => field.name)).toEqual([
+        'Robbing',
+        'Protection',
+        'Daily & style',
+        'Server roles',
+      ]);
       expect(payload.embeds[0].fields[0].value).toContain('`400 Dex`');
       expect(payload.embeds[0].fields[1].value).toContain('Blocks two robbery attempts.');
       expect(payload.components.flatMap((row) => row.components.map((component) => component.custom_id)))
-        .toEqual(['economy:buy:rob-tool', 'economy:buy:shield', 'economy:buy:bronze-role']);
+        .toEqual([
+          'economy:buy:rob-tool',
+          'economy:buy:shield',
+          'economy:buy-title:title-item',
+          'economy:buy:bronze-role',
+        ]);
     });
 
     it('uses a select menu when category-grouped buttons would exceed Discord row limits', async () => {
@@ -105,6 +116,7 @@ describe('EconomyMessageService bounty announcements', () => {
         ...Array.from({ length: 6 }, (_, index) => storeItem(`rob-${index}`, 'rob_tool', `Rob tool ${index}`, 400, 'Robbing tool.')),
         ...Array.from({ length: 6 }, (_, index) => storeItem(`shield-${index}`, 'shield', `Shield ${index}`, 150, 'Protection.')),
         ...Array.from({ length: 6 }, (_, index) => storeItem(`boost-${index}`, 'daily_boost', `Boost ${index}`, 150, 'Daily boost.')),
+        storeItem('title-item', 'custom_title', 'Custom Title', 250, 'Set a leaderboard title.'),
       ];
       const { service, discord } = createService(items);
 
@@ -115,7 +127,9 @@ describe('EconomyMessageService bounty announcements', () => {
       };
       expect(payload.components).toHaveLength(1);
       expect(payload.components[0].components[0].type).toBe(3);
-      expect(payload.components[0].components[0].options).toHaveLength(18);
+      expect(payload.components[0].components[0].options).toHaveLength(19);
+      expect(payload.components[0].components[0].options.map((option) => option.value))
+        .toContain('title-item');
     });
 
     it('shows a useful empty state when no store items are enabled', async () => {

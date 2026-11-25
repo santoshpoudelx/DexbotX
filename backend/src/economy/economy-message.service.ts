@@ -273,7 +273,9 @@ export class EconomyMessageService {
             style: item.kind === 'rob_tool' ? 1 : item.kind === 'role' ? 3 : 2,
             label: item.name.slice(0, 80),
             emoji: { name: STORE_ITEM_EMOJI[item.kind] ?? '📦' },
-            custom_id: `economy:buy:${item.itemId}`,
+            custom_id: item.kind === 'custom_title'
+              ? `economy:buy-title:${item.itemId}`
+              : `economy:buy:${item.itemId}`,
             disabled: item.stock !== null && item.stock <= 0,
           })),
         });
