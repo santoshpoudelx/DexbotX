@@ -1,5 +1,4 @@
 import { InternalServerErrorException } from '@nestjs/common';
-import { MessageFlags } from 'discord.js';
 import type {
   ButtonInteraction,
   ChatInputCommandInteraction,
@@ -147,7 +146,12 @@ function robUserInteraction(
   } as unknown as ChatInputCommandInteraction;
 }
 
-function button(customId: string, userId = ownerId): ButtonInteraction {
+function button(
+  customId: string,
+  userId = ownerId,
+  emojiName?: string,
+  onDefer?: () => void,
+): ButtonInteraction {
   const state = { deferred: false, replied: false };
   return {
     get deferred() { return state.deferred; },
@@ -157,7 +161,11 @@ function button(customId: string, userId = ownerId): ButtonInteraction {
     guildId,
     user: { id: userId },
     memberPermissions: { has: jest.fn(() => false) },
-    deferReply: jest.fn().mockImplementation(async () => { state.deferred = true; }),
+    component: { emoji: emojiName ? { name: emojiName } : null },
+    deferReply: jest.fn().mockImplementation(async () => {
+      state.deferred = true;
+      onDefer?.();
+    }),
     editReply: jest.fn().mockResolvedValue(undefined),
     reply: jest.fn().mockImplementation(async () => { state.replied = true; }),
     deleteReply: jest.fn().mockResolvedValue(undefined),
@@ -188,36 +196,43 @@ describe('EconomyCommandService interaction guards', () => {
 
       await service.handleButton(interaction);
 
-      if (customId.startsWith('economy:buy:')) {
-        expect(interaction.reply).toHaveBeenCalledWith({
-          content: 'The economy is paused.',
-          flags: MessageFlags.Ephemeral,
-        });
-      } else {
-        expect(interaction.editReply).toHaveBeenCalledWith('The economy is paused.');
-      }
+      expect(interaction.deferReply).toHaveBeenCalledTimes(1);
+      expect(interaction.editReply).toHaveBeenCalledWith('The economy is paused.');
       expect(wallet.claimDaily).not.toHaveBeenCalled();
       expect(database.db.update).not.toHaveBeenCalled();
     },
   );
 
+  it('defers ordinary store buttons before checking economy state or querying the store', async () => {
+    const { service, setup, database } = createService();
+    const interaction = button('economy:buy:shield', ownerId, undefined, () => {
+      expect(setup.get).not.toHaveBeenCalled();
+      expect(database.db.select).not.toHaveBeenCalled();
+    });
+
+    await service.handleButton(interaction);
+
+    expect(interaction.deferReply).toHaveBeenCalledTimes(1);
+  });
+
   it('blocks store select-menu purchases while the economy is disabled', async () => {
     const { service, setup } = createService(false, false);
+    const state = { deferred: false };
     const interaction = {
+      get deferred() { return state.deferred; },
       customId: 'economy:buy-select',
       guild: { id: guildId },
       values: ['shield'],
-      deferReply: jest.fn().mockResolvedValue(undefined),
+      component: { options: [{ value: 'shield' }] },
+      deferReply: jest.fn().mockImplementation(async () => { state.deferred = true; }),
       editReply: jest.fn().mockResolvedValue(undefined),
       reply: jest.fn().mockResolvedValue(undefined),
     } as unknown as StringSelectMenuInteraction;
 
     await service.handleSelectMenu(interaction);
 
-    expect(interaction.reply).toHaveBeenCalledWith({
-      content: 'The economy is not enabled in this server.',
-      flags: MessageFlags.Ephemeral,
-    });
+    expect(interaction.deferReply).toHaveBeenCalledTimes(1);
+    expect(interaction.editReply).toHaveBeenCalledWith('The economy is not enabled in this server.');
     expect(setup.get).toHaveBeenCalledWith(guildId);
   });
 
@@ -234,6 +249,29 @@ describe('EconomyCommandService interaction guards', () => {
 
     expect(interaction.editReply).toHaveBeenCalledWith('The economy is paused.');
     expect(database.db.update).not.toHaveBeenCalled();
+  });
+
+  it('rejects a custom-title modal if its store item is no longer a custom title', async () => {
+    const { service, selectResults, wallet } = createService();
+    selectResults.push([{
+      itemId: 'title-item',
+      kind: 'shield',
+      name: 'Shield',
+      price: 150,
+      stock: null,
+    }]);
+    const interaction = {
+      customId: 'economy:title-buy:title-item',
+      guild: { id: guildId },
+      fields: { getTextInputValue: jest.fn(() => 'VIP') },
+      deferReply: jest.fn().mockResolvedValue(undefined),
+      editReply: jest.fn().mockResolvedValue(undefined),
+    } as unknown as ModalSubmitInteraction;
+
+    await service.handleModalSubmit(interaction);
+
+    expect(interaction.editReply).toHaveBeenCalledWith('That item is not a custom title.');
+    expect(wallet.getOrCreateWallet).not.toHaveBeenCalled();
   });
 
   it('rejects wallet-reset confirmations from an unauthorized user without consuming the token', async () => {
@@ -325,16 +363,21 @@ describe('EconomyCommandService interaction guards', () => {
   });
 
   it('opens the custom-title modal as the initial store-button response', async () => {
-    const { service, wallet, selectResults } = createService();
-    selectResults.push([{
-      itemId: 'title-item',
-      kind: 'custom_title',
-      name: 'Custom Title',
-      price: 250,
-      stock: null,
-    }]);
-    wallet.getOrCreateWallet.mockResolvedValue({ balance: 500 } as never);
-    const interaction = button('economy:buy:title-item');
+    const { service, setup, wallet, database } = createService();
+    const interaction = button('economy:buy-title:title-item');
+
+    await service.handleButton(interaction);
+
+    expect(interaction.deferReply).not.toHaveBeenCalled();
+    expect(interaction.showModal).toHaveBeenCalledTimes(1);
+    expect(setup.get).not.toHaveBeenCalled();
+    expect(wallet.getOrCreateWallet).not.toHaveBeenCalled();
+    expect(database.db.select).not.toHaveBeenCalled();
+  });
+
+  it('keeps opening the custom-title modal from existing store buttons', async () => {
+    const { service } = createService();
+    const interaction = button('economy:buy:title-item', ownerId, '🏷️');
 
     await service.handleButton(interaction);
 
@@ -343,19 +386,12 @@ describe('EconomyCommandService interaction guards', () => {
   });
 
   it('opens the custom-title modal as the initial store-select response', async () => {
-    const { service, wallet, selectResults } = createService();
-    selectResults.push([{
-      itemId: 'title-item',
-      kind: 'custom_title',
-      name: 'Custom Title',
-      price: 250,
-      stock: null,
-    }]);
-    wallet.getOrCreateWallet.mockResolvedValue({ balance: 500 } as never);
+    const { service, setup, wallet, database } = createService();
     const interaction = {
       customId: 'economy:buy-select',
       guild: { id: guildId, ownerId },
       values: ['title-item'],
+      component: { options: [{ value: 'title-item', emoji: { name: '🏷️' } }] },
       user: { id: ownerId },
       deferReply: jest.fn().mockResolvedValue(undefined),
       editReply: jest.fn().mockResolvedValue(undefined),
@@ -367,6 +403,9 @@ describe('EconomyCommandService interaction guards', () => {
 
     expect(interaction.deferReply).not.toHaveBeenCalled();
     expect(interaction.showModal).toHaveBeenCalledTimes(1);
+    expect(setup.get).not.toHaveBeenCalled();
+    expect(wallet.getOrCreateWallet).not.toHaveBeenCalled();
+    expect(database.db.select).not.toHaveBeenCalled();
   });
 
   it.each(['economy:bounty-buy:bounty-item', 'economy:bounty-target:bounty-item'])(

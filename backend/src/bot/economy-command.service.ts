@@ -39,6 +39,7 @@ import { EconomyMessageService } from '../economy/economy-message.service';
 const RESET_CONFIRMATION_TTL_SECONDS = 300;
 const EPHEMERAL_REPLY_TTL_MS = 60_000;
 const GENERIC_ROB_REFUSAL = 'That member cannot be robbed right now. Try another member.';
+const CUSTOM_TITLE_ITEM_EMOJI = '🏷️';
 
 type EconomyReplyInteraction =
   | ChatInputCommandInteraction
@@ -143,8 +144,16 @@ export class EconomyCommandService {
 
   async handleButton(interaction: ButtonInteraction): Promise<void> {
     if (!interaction.customId.startsWith('economy:')) return;
-    const opensStoreFlow = interaction.customId.startsWith('economy:buy:');
-    if (!opensStoreFlow) await this.deferEphemeralReply(interaction);
+    const customTitleItemId = this.customTitleButtonItemId(interaction);
+    if (customTitleItemId !== null) {
+      if (!interaction.guild) {
+        await this.replyEphemeral(interaction, 'Economy purchases are only available in a server.');
+        return;
+      }
+      await interaction.showModal(this.customTitleModal(customTitleItemId));
+      return;
+    }
+    await this.deferEphemeralReply(interaction);
     const isMemberAction = interaction.customId.startsWith('economy:buy:')
       || ['economy:balance', 'economy:reward', 'economy:shop'].includes(interaction.customId);
     if (isMemberAction) {
@@ -222,12 +231,19 @@ export class EconomyCommandService {
 
   async handleSelectMenu(interaction: StringSelectMenuInteraction): Promise<void> {
     if (interaction.customId === 'economy:buy-select' && interaction.guild) {
+      const selectedValue = interaction.values[0];
+      const customTitleItemId = this.customTitleSelectItemId(interaction, selectedValue);
+      if (customTitleItemId !== null) {
+        await interaction.showModal(this.customTitleModal(customTitleItemId));
+        return;
+      }
+      await this.deferEphemeralReply(interaction);
       const unavailable = await this.memberActionUnavailable(interaction.guild.id);
       if (unavailable) {
         await this.replyEphemeral(interaction, unavailable);
         return;
       }
-      await this.handleStorePurchase(interaction, interaction.values[0]);
+      await this.handleStorePurchase(interaction, selectedValue);
       return;
     }
     if (interaction.customId.startsWith('economy:bounty-buy:') && interaction.guild) {
@@ -274,7 +290,7 @@ export class EconomyCommandService {
         await interaction.editReply(unavailable);
         return;
       }
-      const itemId = interaction.customId.split(':')[2];
+      const itemId = interaction.customId.slice('economy:title-buy:'.length);
       const settings = (await this.setup.get(interaction.guild.id))?.settings ?? defaultEconomySettings();
       const raw = interaction.fields.getTextInputValue('title');
       const title = sanitizeCustomTitle(raw);
@@ -286,6 +302,10 @@ export class EconomyCommandService {
         .where(and(eq(shopItems.guildId, interaction.guild.id), eq(shopItems.itemId, itemId), eq(shopItems.enabled, true))).limit(1);
       if (!item[0]) {
         await interaction.editReply('That item is not available.');
+        return;
+      }
+      if (item[0].kind !== 'custom_title') {
+        await interaction.editReply('That item is not a custom title.');
         return;
       }
       if (item[0].stock !== null && item[0].stock <= 0) {
@@ -528,6 +548,45 @@ export class EconomyCommandService {
     return null;
   }
 
+  private customTitleButtonItemId(interaction: ButtonInteraction): string | null {
+    const modalPrefix = 'economy:buy-title:';
+    if (interaction.customId.startsWith(modalPrefix)) {
+      const itemId = interaction.customId.slice(modalPrefix.length);
+      return itemId || null;
+    }
+
+    const legacyPrefix = 'economy:buy:';
+    const component = interaction.component;
+    if (
+      interaction.customId.startsWith(legacyPrefix)
+      && 'emoji' in component
+      && component.emoji?.name === CUSTOM_TITLE_ITEM_EMOJI
+    ) {
+      const itemId = interaction.customId.slice(legacyPrefix.length);
+      return itemId || null;
+    }
+    return null;
+  }
+
+  private customTitleSelectItemId(interaction: StringSelectMenuInteraction, selectedValue: string): string | null {
+    const selectedOption = interaction.component.options.find((option) => option.value === selectedValue);
+    return selectedOption?.emoji?.name === CUSTOM_TITLE_ITEM_EMOJI ? selectedValue : null;
+  }
+
+  private customTitleModal(itemId: string): ModalBuilder {
+    const modal = new ModalBuilder()
+      .setCustomId(`economy:title-buy:${itemId}`)
+      .setTitle('Choose your custom title');
+    const title = new TextInputBuilder()
+      .setCustomId('title')
+      .setLabel('Title (maximum 20 characters)')
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true)
+      .setMaxLength(20);
+    modal.addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(title));
+    return modal;
+  }
+
   private async deferEphemeralReply(interaction: EconomyReplyInteraction): Promise<void> {
     if (!interaction.deferred && !interaction.replied) {
       await interaction.deferReply({ flags: MessageFlags.Ephemeral });
@@ -672,22 +731,11 @@ export class EconomyCommandService {
     }
     const settings = (await this.setup.get(guildId))?.settings ?? defaultEconomySettings();
     if (item[0].kind === 'custom_title') {
-      const wallet = await this.wallet.getOrCreateWallet(guildId, interaction.user.id);
-      if (wallet.balance < item[0].price) {
-        await this.replyEphemeral(interaction, `You do not have enough ${settings.currencyName}.`);
+      if (interaction.deferred || interaction.replied) {
+        await interaction.editReply('This store button is outdated. Please refresh the store and try again.');
         return;
       }
-      const modal = new ModalBuilder()
-        .setCustomId(`economy:title-buy:${item[0].itemId}`)
-        .setTitle('Choose your custom title');
-      const title = new TextInputBuilder()
-        .setCustomId('title')
-        .setLabel('Title (maximum 20 characters)')
-        .setStyle(TextInputStyle.Short)
-        .setRequired(true)
-        .setMaxLength(20);
-      modal.addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(title));
-      await interaction.showModal(modal);
+      await interaction.showModal(this.customTitleModal(item[0].itemId));
       return;
     }
     await this.deferEphemeralReply(interaction);
@@ -839,17 +887,7 @@ export class EconomyCommandService {
       return this.replyEphemeral(interaction, `You do not have enough ${settings.currencyName}.`);
     }
     if (item[0].kind === 'custom_title') {
-      const modal = new ModalBuilder()
-        .setCustomId(`economy:title-buy:${item[0].itemId}`)
-        .setTitle('Choose your custom title');
-      const title = new TextInputBuilder()
-        .setCustomId('title')
-        .setLabel('Title (maximum 20 characters)')
-        .setStyle(TextInputStyle.Short)
-        .setRequired(true)
-        .setMaxLength(20);
-      modal.addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(title));
-      await interaction.showModal(modal);
+      await interaction.showModal(this.customTitleModal(item[0].itemId));
       return;
     }
     await this.deferEphemeralReply(interaction);
