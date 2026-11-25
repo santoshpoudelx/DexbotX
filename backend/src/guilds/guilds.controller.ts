@@ -92,10 +92,4 @@ export class GuildsController {
   async autoRoleActivity(@Req() req: AuthedRequest) {
     return { activity: await this.autoRoles.activity(req.guild!.id) };
   }
-
-  @Get(':guildId/auto-roles/diagnose')
-  @UseGuards(GuildAccessGuard)
-  async diagnoseAutoRoles(@Req() req: AuthedRequest) {
-    return this.autoRoles.diagnose(req.guild!);
-  }
 }

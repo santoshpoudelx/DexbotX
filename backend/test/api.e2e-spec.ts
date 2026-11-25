@@ -1,4 +1,5 @@
 import type { NestExpressApplication } from '@nestjs/platform-express';
+import { InternalServerErrorException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { createCanvas } from '@napi-rs/canvas';
 import {
@@ -11,8 +12,6 @@ import {
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
 import { and, eq, sql } from 'drizzle-orm';
-import { Worker } from 'bullmq';
-import type { Redis } from 'ioredis';
 import { ChildProcess, execFileSync, spawn } from 'node:child_process';
 import { chownSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -24,10 +23,10 @@ import { configureApp } from '../src/app.setup';
 import { BotModule } from '../src/bot/bot.module';
 import { BotService } from '../src/bot/bot.service';
 import { DatabaseService } from '../src/db/database.service';
-import { adminAudit, auditLogs, autoRoleEvents, guildChannels, guildRoles, guildSettings, guilds, modActions } from '../src/db/schema';
+import { adminAudit, auditLogs, guildChannels, guildRoles, guildSettings, guilds, modActions } from '../src/db/schema';
 import { SettingsCache } from '../src/redis/settings-cache.service';
 import { RedisService } from '../src/redis/redis.service';
-import { MEMBER_EVENTS_QUEUE, MemberEventsQueue, type AutoRoleJob, type MemberEventJob } from '../src/queue/member-events.queue';
+import { MemberEventsQueue } from '../src/queue/member-events.queue';
 import { WorkerModule } from '../src/worker/worker.module';
 import { APP_CONFIG } from '../src/core/config';
 import { SessionService } from '../src/auth/session.service';
@@ -39,14 +38,13 @@ import { GuildsService } from '../src/guilds/guilds.service';
 import { messageConfigSchema } from '../src/shared/message-config';
 import { sha256Hex } from '../src/shared/crypto';
 import { GuildSyncService } from '../src/bot/guild-sync.service';
-import { MemberEventsProcessor } from '../src/worker/member-events.processor';
 import { findOnboardingChannel } from '../src/bot/bot.service';
 import { OnboardingService } from '../src/discord/onboarding.service';
 import { defaultAutoRoleConfig } from '../src/shared/auto-roles';
 import { ModerationService } from '../src/bot/moderation.service';
 import { HealthController } from '../src/health/health.controller';
 import { guildRolesCacheKey } from '../src/guilds/guild-events';
-import { makeJobId } from '../src/shared/job-id';
+import { EconomySetupService } from '../src/economy/economy-setup.service';
 
 const PG_PORT = 54329;
 const REDIS_PORT = 63799;
@@ -281,7 +279,11 @@ function onboardingGuild(
   systemChannel?: ReturnType<typeof onboardingChannel>,
   joinedTimestamp = Date.now(),
 ) {
-  const me = { id: 'bot' };
+  const me = {
+    id: 'bot',
+    roles: { highest: { id: 'bot-role', position: 1 } },
+    permissions: { has: () => false },
+  };
   return {
     id,
     name: `Guild ${id}`,
@@ -471,8 +473,6 @@ describe('DexBotX API', () => {
       }
       const defaultsMigration = readFileSync(join(__dirname, '..', 'drizzle', '0006_auto_roles_defaults.sql'), 'utf8');
       await client.unsafe(defaultsMigration);
-      const autoRolesMigration = readFileSync(join(__dirname, '..', 'drizzle', '0007_auto_roles_30_seconds.sql'), 'utf8');
-      await client.unsafe(autoRolesMigration);
 
       const columns = await client<{ column_name: string }[]>`
         SELECT column_name
@@ -494,15 +494,6 @@ describe('DexBotX API', () => {
       expect(defaults[0]?.column_default).toContain('"description": "Enjoy your new permissions and privileges! ✨"');
       expect(defaults[0]?.column_default).toContain('"color": "#7c6cff"');
       expect(defaults[0]?.column_default).toContain('"footer": "Enjoy your new role! 💜"');
-      expect(defaults[0]?.column_default).toContain('"delaySeconds": 3');
-      const activityColumns = await client<{ column_name: string }[]>`
-        SELECT column_name
-        FROM information_schema.columns
-        WHERE table_schema = 'public'
-          AND table_name = 'auto_role_events'
-          AND column_name = 'delay_seconds'
-      `;
-      expect(activityColumns).toHaveLength(1);
     } finally {
       await client.end({ timeout: 5 });
     }
@@ -783,6 +774,7 @@ describe('DexBotX API', () => {
 
   it('avoids repeated Discord REST calls for cached user, guild, channel and preset reads', async () => {
     const redis = app.get(RedisService).client;
+    await app.get(GuildsService).forgetUserGuilds(USER_ID);
     const testSession = await app.get(SessionService).create(
       { id: USER_ID, username: 'tester', global_name: 'Test Er', avatar: null },
       { access_token: 'tok-abc', token_type: 'Bearer', expires_in: 604800, refresh_token: 'r', scope: 'identify guilds' },
@@ -820,9 +812,11 @@ describe('DexBotX API', () => {
 
   it('checks Embed Links when Auto Roles announcements use embeds', async () => {
     const discord = app.get(DiscordRestService);
+    const redis = app.get(RedisService).client;
     const previousRoles = stubGuildRoles;
     const previousBotRoleIds = stubBotRoleIds;
     try {
+      await redis.del(`discord:cache:roles:${G1}`, `discord:cache:member:${G1}:123456789012345678`);
       stubGuildRoles = [{
         id: G1,
         name: '@everyone',
@@ -840,6 +834,7 @@ describe('DexBotX API', () => {
         | PermissionFlagsBits.SendMessages
         | PermissionFlagsBits.EmbedLinks
       ).toString();
+      await redis.del(`discord:cache:roles:${G1}`);
       await expect(discord.canBotPost(C1, true)).resolves.toBe(true);
     } finally {
       stubGuildRoles = previousRoles;
@@ -1196,7 +1191,8 @@ describe('DexBotX API', () => {
     );
     const session = (await app.get(SessionService).get(cachedSession.sid))!;
 
-    await redis.del('discord:blocked_until', 'discord:cache:channels:' + G1);
+    await userGuilds.forgetUserGuilds(USER_ID);
+    await redis.del('discord:blocked_until', `discord:cache:channels:${G1}`);
     rateLimitGuildChannels = false;
     const minuteKey = `stat:min:${Math.floor(Date.now() / 60_000)}`;
     const totalBefore = Number(await redis.hget(minuteKey, 'd_total') ?? 0);
@@ -1230,7 +1226,8 @@ describe('DexBotX API', () => {
     expect(await userGuilds.getUserGuilds(session)).toEqual(cachedGuilds);
     expect(discordCalls).toHaveLength(0);
 
-    await redis.del('discord:blocked_until', `ug:${USER_ID}`, `discord:cache:channels:${G1}`);
+    await redis.del('discord:blocked_until', `discord:cache:channels:${G1}`);
+    await userGuilds.forgetUserGuilds(USER_ID);
   });
 
   it('lists only servers the user can manage, flagging where the bot is missing', async () => {
@@ -1268,6 +1265,22 @@ describe('DexBotX API', () => {
     expect(ch.body.channels[0].category).toBe('Info');
   });
 
+  it('returns a server error when economy setup fails', async () => {
+    const setup = app.get(EconomySetupService);
+    const enable = jest.spyOn(setup, 'enable').mockRejectedValueOnce(
+      new InternalServerErrorException('Economy setup failed. Verify database migrations are applied and try again.'),
+    );
+
+    try {
+      const response = await http().post(`/guilds/${G1}/economy/enable`).set(authed()).expect(500);
+      expect(response.body.message).toBe(
+        'Economy setup failed. Verify database migrations are applied and try again.',
+      );
+    } finally {
+      enable.mockRestore();
+    }
+  });
+
   it('validates and saves Auto Roles settings and protects test/activity endpoints', async () => {
     const config = defaultAutoRoleConfig();
     config.announce.message = 'Welcome @everyone {user}';
@@ -1292,29 +1305,6 @@ describe('DexBotX API', () => {
     await http().post(`/guilds/${G1}/auto-roles/test`).set(authed()).expect(400);
     await http().get(`/guilds/${G1}/auto-roles/activity`).set(authed()).expect(200, { activity: [] });
     await http().get(`/guilds/${G2}/auto-roles/activity`).set(authed()).expect(403);
-    await http().get(`/guilds/${G2}/auto-roles/diagnose`).set(authed()).expect(403);
-
-    const [enqueueFailure] = await app.get(DatabaseService).db.insert(autoRoleEvents).values({
-      guildId: G1,
-      userId: '888555888555888555',
-      roleId: '555555555555555554',
-      outcome: 'enqueue_failed',
-      delaySeconds: 0,
-    }).returning({ id: autoRoleEvents.id });
-    const activity = await http().get(`/guilds/${G1}/auto-roles/activity`).set(authed()).expect(200);
-    expect(activity.body.activity).toEqual([expect.objectContaining({
-      outcome: 'enqueue_failed',
-      delaySeconds: 0,
-      userId: '888555888555888555',
-    })]);
-    const diagnose = await http().get(`/guilds/${G1}/auto-roles/diagnose`).set(authed()).expect(200);
-    expect(diagnose.body).toMatchObject({
-      guildId: G1,
-      enabled: false,
-      delaySeconds: 3,
-      recent: [expect.objectContaining({ outcome: 'enqueue_failed', delaySeconds: 0 })],
-    });
-    await app.get(DatabaseService).db.delete(autoRoleEvents).where(eq(autoRoleEvents.id, enqueueFailure.id));
 
     const audit = await app.get(DatabaseService).db.select().from(auditLogs).where(eq(auditLogs.guildId, G1));
     expect(audit).toEqual(expect.arrayContaining([
@@ -1529,6 +1519,7 @@ describe('DexBotX API', () => {
   it('repairs channel access after a denied test post and retries once', async () => {
     const redis = app.get(RedisService).client;
     await redis.del(`permfix:${G1}:${C1}`);
+    await redis.del(`discord:cache:roles:${G1}`, `discord:cache:member:${G1}:123456789012345678`);
     stubGuildRoles = [];
     stubBotRoleIds = [];
     failMessagePost = false;
@@ -1548,6 +1539,7 @@ describe('DexBotX API', () => {
         PermissionFlagsBits.AttachFiles |
         PermissionFlagsBits.ReadMessageHistory
       ).toString(),
+      color: 0,
       mentionable: false,
       hoist: true,
     });
@@ -1888,59 +1880,37 @@ describe('Guild onboarding', () => {
 });
 
 describe('Bot → queue → worker', () => {
-  it('reserves one-second assignment slots for a 30-member burst', async () => {
+  it('uses atomic join counters and expiring two-second guild slots', async () => {
     const guildId = '444444444444444444';
     const redis = botModule.get(RedisService).client;
     const scheduling = botModule.get(BotService) as unknown as {
+      incrementAutoRoleJoinCounter(guildId: string): Promise<number>;
       reserveAutoRoleSlot(guildId: string): Promise<number>;
     };
+    const counterKey = `guild:${guildId}:joins:60`;
     const slotKey = `guild:${guildId}:autorole-slot`;
-    await redis.del(slotKey);
-    const now = jest.spyOn(Date, 'now').mockReturnValue(1_000_000);
+    await redis.del(counterKey, slotKey);
 
     try {
-      const slots = [];
-      for (let index = 0; index < 30; index++) slots.push(await scheduling.reserveAutoRoleSlot(guildId));
-      expect(slots).toEqual(Array.from({ length: 30 }, (_, index) => index));
+      expect(await scheduling.incrementAutoRoleJoinCounter(guildId)).toBe(1);
+      expect(await scheduling.incrementAutoRoleJoinCounter(guildId)).toBe(2);
+      const counterTtl = await redis.pttl(counterKey);
+      expect(counterTtl).toBeGreaterThan(0);
+      expect(counterTtl).toBeLessThanOrEqual(60_000);
+
+      await redis.set(counterKey, '41');
+      expect(await scheduling.incrementAutoRoleJoinCounter(guildId)).toBe(42);
+      expect(await redis.pttl(counterKey)).toBeGreaterThan(0);
+
+      expect(await scheduling.reserveAutoRoleSlot(guildId)).toBe(0);
+      const nextSlotDelay = await scheduling.reserveAutoRoleSlot(guildId);
+      expect(nextSlotDelay).toBeGreaterThanOrEqual(1);
+      expect(nextSlotDelay).toBeLessThanOrEqual(2);
       const slotTtl = await redis.pttl(slotKey);
       expect(slotTtl).toBeGreaterThan(60_000);
-      expect(slotTtl).toBeLessThanOrEqual(90_000);
+      expect(slotTtl).toBeLessThanOrEqual(62_000);
     } finally {
-      now.mockRestore();
-      await redis.del(slotKey);
-    }
-  });
-
-  it('paces 30 concurrent assignments one per guild-second with real Redis', async () => {
-    const guildId = '444444444444444445';
-    const redis = workerModule.get(RedisService).client;
-    const processing = workerModule.get(MemberEventsProcessor) as unknown as {
-      reserveAutoRoleAssignmentSlot(guildId: string): Promise<number>;
-    };
-    const slotKey = `guild:${guildId}:autorole-assignment-slot`;
-    let now = 2_000_000;
-    const clock = jest.spyOn(Date, 'now').mockImplementation(() => now);
-    await redis.del(slotKey);
-
-    try {
-      let remaining = 30;
-      const startTimes: number[] = [];
-      while (remaining > 0) {
-        const waits = await Promise.all(Array.from(
-          { length: remaining },
-          () => processing.reserveAutoRoleAssignmentSlot(guildId),
-        ));
-        expect(waits.filter((wait) => wait === 0)).toHaveLength(1);
-        expect(waits.filter((wait) => wait > 0)).toHaveLength(remaining - 1);
-        startTimes.push(now);
-        remaining--;
-        now += 1000;
-      }
-      expect(startTimes).toHaveLength(30);
-      expect(startTimes.slice(1).map((value, index) => value - startTimes[index])).toEqual(Array(29).fill(1000));
-    } finally {
-      clock.mockRestore();
-      await redis.del(slotKey);
+      await redis.del(counterKey, slotKey);
     }
   });
 
@@ -1996,79 +1966,6 @@ describe('Bot → queue → worker', () => {
       await new Promise((r) => setTimeout(r, 50));
     }
   };
-
-  it('accepts every member-events producer job in real BullMQ and allows a completed-member rejoin', async () => {
-    const producer = botModule.get(MemberEventsQueue);
-    const memberId = '888777888777888777';
-    const timestamp = Date.now();
-    const welcomeJob: MemberEventJob = {
-      kind: 'welcome',
-      guildId: G1,
-      channelId: C1,
-      user: { id: memberId, username: 'joiner', displayName: 'Joiner', avatarUrl: '' },
-      guild: { name: 'Alpha Guild', memberCount: 121, bannerUrl: null },
-    };
-    const goodbyeJob: MemberEventJob = {
-      ...welcomeJob,
-      kind: 'goodbye',
-      user: { ...welcomeJob.user, id: '888666888666888666' },
-    };
-    const autoRoleJob: AutoRoleJob = {
-      kind: 'auto-role',
-      guildId: G1,
-      userId: memberId,
-      username: 'joiner',
-      joinTimestamp: timestamp,
-      readyTimestamp: timestamp,
-      pending: false,
-      memberRoleIds: [],
-    };
-    const jobIds = [
-      makeJobId('welcome', G1, memberId, Math.floor(timestamp / 15_000)),
-      makeJobId('goodbye', G1, goodbyeJob.user.id, Math.floor(timestamp / 15_000)),
-      makeJobId('autorole', G1, memberId, timestamp),
-    ];
-    let worker: Worker | undefined;
-    let workerConnection: Redis | undefined;
-
-    try {
-      await producer.enqueue(welcomeJob);
-      await producer.enqueue(goodbyeJob);
-      await producer.enqueueAutoRole(autoRoleJob, 0);
-      await producer.enqueueAutoRole(autoRoleJob, 0);
-      expect((await Promise.all(jobIds.map((id) => queue().getJob(id)))).map((job) => job?.id)).toEqual(jobIds);
-      expect((await queue().getJobs(['waiting', 'delayed'])).filter((job) => job.id === jobIds[2])).toHaveLength(1);
-
-      workerConnection = botModule.get(RedisService).client.duplicate({ maxRetriesPerRequest: null });
-      worker = new Worker(MEMBER_EVENTS_QUEUE, async () => 'sent', {
-        connection: workerConnection,
-        autorun: false,
-      });
-      await worker.waitUntilReady();
-      const autoRoleCompleted = new Promise<void>((resolve) => {
-        worker!.on('completed', (job) => {
-          if (job.id === jobIds[2]) resolve();
-        });
-      });
-      void worker.run().catch(() => undefined);
-      await autoRoleCompleted;
-      await worker.pause();
-      expect(await queue().getJob(jobIds[2])).toBeUndefined();
-
-      const rejoin = { ...autoRoleJob, joinTimestamp: timestamp + 1, readyTimestamp: timestamp + 1 };
-      await producer.enqueueAutoRole(rejoin, 0);
-      const rejoinJobId = makeJobId('autorole', G1, memberId, rejoin.joinTimestamp);
-      expect(await queue().getJob(rejoinJobId)).toBeDefined();
-      expect(jobIds.every((id) => !id.includes(':'))).toBe(true);
-    } finally {
-      await worker?.close();
-      if (workerConnection && workerConnection.status !== 'end') await workerConnection.quit();
-      const jobs = await queue().getJobs(['waiting', 'delayed', 'completed', 'failed']);
-      await Promise.all(jobs.filter((job) =>
-        jobIds.includes(job.id ?? '') || ('userId' in job.data && job.data.userId === memberId),
-      ).map((job) => job.remove()));
-    }
-  });
 
   it('skips all member-event posts while maintenance mode is enabled', async () => {
     const redis = botModule.get(RedisService).client;
@@ -2333,8 +2230,8 @@ describe('Bot → queue → worker', () => {
   it('keeps the named API, shard and worker Redis clients below the connection budget', async () => {
     await workerModule.init();
     const apiRedis = app.get(RedisService);
-    expect(await apiRedis.connectedClients()).toBeLessThanOrEqual(10);
     const clientList = await apiRedis.client.call('CLIENT', 'LIST') as string;
+    expect(await apiRedis.connectedClients()).toBeLessThanOrEqual(10);
     for (const name of ['api:main', 'api:sub', 'shard0:main', 'shard0:sub', 'worker:main', 'worker:sub']) {
       expect(clientList).toContain(`name=${name}`);
     }

@@ -17,7 +17,7 @@ export class RedisService implements OnApplicationShutdown {
   constructor(@Inject(APP_CONFIG) private readonly config: AppConfig) {
     this.role = process.env.DEXBOTX_PROCESS_ROLE ?? (process.env.SHARD_ID ? `shard${process.env.SHARD_ID}` : 'api');
     this.client = this.connect(`${this.role}:main`, { maxRetriesPerRequest: this.role === 'worker' ? null : 3 });
-    if (this.config.cacheRedisUrl) {
+    if (this.config.cacheRedisUrl && this.role === 'api') {
       this.cacheClient = new Redis(this.config.cacheRedisUrl, {
         connectionName: `${this.role}:cache`,
         maxRetriesPerRequest: 3,

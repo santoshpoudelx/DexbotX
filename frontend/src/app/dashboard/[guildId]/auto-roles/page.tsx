@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { AlertTriangle, Hash, RotateCcw, Save, Send, ShieldCheck, TriangleAlert } from 'lucide-react';
 import { toast } from 'sonner';
 import { EditorSkeleton } from '@/components/dashboard/loading-skeleton';
-import { PageHeader } from '@/components/dashboard/ui';
+import { PageHeader, StatusPill } from '@/components/dashboard/ui';
 import { Button } from '@/components/ui/button';
 import { Input, Select, Textarea } from '@/components/ui/input';
 import { ColorField } from '@/components/editor/color-field';
@@ -260,7 +260,7 @@ export default function AutoRolesPage() {
         description="Give new members a role automatically with adaptive timing."
         right={
           <>
-            <Badge tone={draft.enabled ? 'success' : 'neutral'}>{draft.enabled ? 'Enabled' : 'Disabled'}</Badge>
+            <StatusPill on={draft.enabled} />
             <Switch aria-label="Enable Auto Roles" checked={draft.enabled} onCheckedChange={(enabled) => patch({ enabled })} />
           </>
         }
@@ -325,7 +325,7 @@ export default function AutoRolesPage() {
           <Section title="Member filters" description="Choose which members can receive the role.">
             <div className="mt-4 space-y-3">
               <ToggleRow id="skip-bots" label="Skip bots" hint="Do not assign the role to bot accounts." checked={draft.skipBots} onChange={(skipBots) => patch({ skipBots })} />
-              <p className="text-xs text-muted-foreground">Roles are only assigned after the member completes any required rules screening.</p>
+              <ToggleRow id="wait-screening" label="Wait for membership screening" hint="Assign after screening is complete." checked={draft.waitForScreening} onChange={(waitForScreening) => patch({ waitForScreening })} />
             </div>
           </Section>
 
@@ -507,13 +507,12 @@ export default function AutoRolesPage() {
                 ) : (
                   <div className="overflow-x-auto">
                     <table className="w-full text-left text-sm">
-                      <thead><tr className="border-b border-border text-xs text-muted-foreground"><th className="py-2">User</th><th>Status</th><th className="text-right">Delay</th><th className="text-right">Time</th></tr></thead>
+                      <thead><tr className="border-b border-border text-xs text-muted-foreground"><th className="py-2">User</th><th>Status</th><th className="text-right">Time</th></tr></thead>
                       <tbody>
                         {activityData.activity.map((item) => (
                           <tr key={item.id} className="border-b border-border last:border-0">
                             <td className="py-2 font-mono text-xs">{item.userId}</td>
-                            <td className="py-2"><Badge tone={item.outcome === 'assigned' ? 'success' : item.outcome === 'failed' || item.outcome === 'enqueue_failed' ? 'warning' : 'neutral'}>{item.outcome.replaceAll('_', ' ')}</Badge></td>
-                            <td className="py-2 text-right text-xs text-muted-foreground">{item.delaySeconds === null ? '—' : `${item.delaySeconds}s`}</td>
+                            <td className="py-2"><Badge tone={item.outcome === 'assigned' ? 'success' : item.outcome === 'failed' ? 'warning' : 'neutral'}>{item.outcome.replaceAll('_', ' ')}</Badge></td>
                             <td className="py-2 text-right text-xs text-muted-foreground">{relativeTime(item.createdAt)}</td>
                           </tr>
                         ))}

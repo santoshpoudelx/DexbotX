@@ -10,14 +10,14 @@ DexBotX is an all-in-one Discord community bot built to help servers stay safer,
 - **Social Notifications**
 - **AI Auto Chat**
 - **Auto Roles**
-- **economy & store**
+- **Economy** — opt-in Dex rewards, store purchases, gifts, anytime robberies, and purchasable server roles.
 - **Welcome and Goodbye**
 - **Auto Moderation** (coming soon; moderation slash commands are available)
 - **Web Dashboard Easy Setup**
 - **Open Source and Free**
 - **Fast and Reliable**
 
-**Not available yet:** Economy features, 24/7 music with custom playlists, and self-service editing of the bot's profile image, banner, or description are planned ideas, not features of the current release.
+**Not available yet:** 24/7 music with custom playlists and self-service editing of the bot's profile image, banner, or description are planned ideas, not features of the current release.
 
 ## Architecture
 

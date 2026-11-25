@@ -118,7 +118,9 @@ export class WelcomeService {
     });
     await this.cache.invalidate(guild.id);
 
-    await this.removeReplacedBackground(guild.id, before, kind, config);
+    void this.removeReplacedBackground(guild.id, before, kind, config).catch((err: unknown) => {
+      this.logger.warn(`Background prune failed guild=${guild.id}: ${err instanceof Error ? err.message : String(err)}`);
+    });
     return { config, imageKey: config.image.enabled ? createCardKey(config.image, session.avatarHash, guild.bannerHash) : null };
   }
 
@@ -147,7 +149,9 @@ export class WelcomeService {
     });
     await this.cache.invalidate(guild.id);
 
-    await this.removeReplacedBackground(guild.id, before, kind, config);
+    void this.removeReplacedBackground(guild.id, before, kind, config).catch((err: unknown) => {
+      this.logger.warn(`Background prune failed guild=${guild.id}: ${err instanceof Error ? err.message : String(err)}`);
+    });
     return { config, imageKey: config.image.enabled ? createCardKey(config.image, session.avatarHash, guild.bannerHash) : null };
   }
 

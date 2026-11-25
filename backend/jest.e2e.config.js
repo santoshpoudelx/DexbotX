@@ -1,4 +1,4 @@
-/** Integration tests: real Postgres (embedded) + real Redis (redis-server must be on PATH). */
+/** Integration tests: embedded Postgres plus Redis from DEXBOTX_E2E_REDIS_URL or PATH. */
 module.exports = {
   rootDir: '.',
   testEnvironment: 'node',

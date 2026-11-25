@@ -1,12 +1,28 @@
 name: backend-ci
 on:
   push:
-    branches: [main]
     paths: ["backend/**", ".github/workflows/backend-ci.yml"]
   pull_request:
     paths: ["backend/**", ".github/workflows/backend-ci.yml"]
 
 jobs:
+  economy-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - run: npm ci
+      - name: Run isolated economy Docker tests
+        run: npm run economy:test
+        env:
+          NODE_ENV: test
   test:
     runs-on: ubuntu-latest
     defaults:

@@ -6,6 +6,15 @@ export const dynamic = 'force-dynamic';
 type RouteContext = { params: Promise<{ path?: string[] }> };
 const BACKEND_PROXY_SECRET_HEADER = 'x-dexbotx-proxy-secret';
 export const MAX_PROXY_BODY_BYTES = 2 * 1024 * 1024 + 65536;
+export const ECONOMY_PROXY_TIMEOUT_MS = 60_000;
+
+function proxyTimeoutMs(apiPath: string, method: string): number | null {
+  if (apiPath === 'events/guilds') return null;
+  if ((apiPath.includes('/economy/') || apiPath.endsWith('/refresh')) && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
+    return ECONOMY_PROXY_TIMEOUT_MS;
+  }
+  return 30_000;
+}
 
 function getBackendUrl(): URL {
   const value = (process.env.BACKEND_URL ?? (process.env.NODE_ENV === 'development' ? 'http://localhost:4000' : '')).trim();
@@ -64,13 +73,14 @@ async function proxyRequest(request: NextRequest, { params }: RouteContext): Pro
   }
   let response: Response;
   try {
+    const timeoutMs = proxyTimeoutMs(apiPath, method);
     response = await fetch(target, {
       method,
       headers,
       body,
       cache: 'no-store',
       redirect: 'manual',
-      ...(apiPath === 'events/guilds' ? {} : { signal: AbortSignal.timeout(15_000) }),
+      ...(timeoutMs === null ? {} : { signal: AbortSignal.timeout(timeoutMs) }),
     });
   } catch (error) {
     if (error instanceof DOMException && error.name === 'TimeoutError') {

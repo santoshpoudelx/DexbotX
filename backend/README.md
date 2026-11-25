@@ -8,8 +8,6 @@ The backend package contains three Node.js processes:
 
 The processes share PostgreSQL for application data and Redis for sessions, caching, pub/sub, rate limits, and jobs. PostgreSQL-compatible databases and Redis-compatible services can be hosted by any provider.
 
-Auto Roles assigns one safe configured role after a joining member is ready (including completion of Discord membership screening). Assignment timing is automatic, capped at 30 seconds for planned delays, and paced to one assignment per guild per second; Discord rate limits may delay execution further without dropping the job. The dashboard lists recent outcome reasons and elapsed delay. The protected endpoints are `PUT /guilds/:guildId/auto-roles`, `GET /guilds/:guildId/auto-roles/activity`, and `GET /guilds/:guildId/auto-roles/diagnose`.
-
 ## Requirements
 
 - Node.js 26.x and npm.
@@ -93,7 +91,8 @@ The public API status endpoint is `GET /dexbotx/health` (also supports `HEAD`). 
 | `npm run lint` | Lint backend source |
 | `npm run typecheck` | TypeScript checks |
 | `npm test` | Unit tests |
-| `npm run test:e2e` | End-to-end tests (embedded PostgreSQL; use `DEXBOTX_E2E_REDIS_URL` for Docker Redis when `redis-server` is unavailable) |
+| `npm run test:e2e` | API end-to-end tests |
+| `npm run economy:test` | Docker-backed economy integration tests |
 | `npm run build` | Build production files |
 | `npm run db:generate` | Generate a migration after changing the Drizzle schema |
 | `npm run db:migrate` | Apply migrations |

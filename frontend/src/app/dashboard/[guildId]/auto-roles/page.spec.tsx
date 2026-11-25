@@ -30,7 +30,9 @@ vi.mock('@/store/api', () => ({
 const config = {
   enabled: false,
   roleIds: [],
-  delaySeconds: 3,
+  delayMode: 'smart' as const,
+  minDelaySeconds: 0,
+  fixedDelaySeconds: 0,
   skipBots: true,
   waitForScreening: true,
   announce: {
@@ -119,7 +121,7 @@ describe('AutoRolesPage', () => {
     expect(screen.getByText('Saved role became unsafe')).toBeTruthy();
   });
 
-  it('keeps timing automatic and always waits for screening without exposing delay controls', () => {
+  it('uses adaptive timing without exposing delay controls', () => {
     render(<AutoRolesPage />);
 
     expect(screen.queryByRole('heading', { name: 'Timing' })).toBeNull();
@@ -127,8 +129,7 @@ describe('AutoRolesPage', () => {
     expect(screen.queryByLabelText('Minimum delay')).toBeNull();
     expect(screen.queryByLabelText('Fixed delay')).toBeNull();
     expect(screen.getByText('Skip bots')).toBeTruthy();
-    expect(screen.queryByText('Wait for membership screening')).toBeNull();
-    expect(screen.getByText('Roles are only assigned after the member completes any required rules screening.')).toBeTruthy();
+    expect(screen.getByText('Wait for membership screening')).toBeTruthy();
   });
 
   it('shows field-level validation when required Auto Roles settings are missing', () => {
@@ -166,28 +167,6 @@ describe('AutoRolesPage', () => {
 
     expect(screen.getByRole('alert').textContent).toContain('Activity could not be loaded.');
     expect(screen.queryByText('No auto-role activity yet.')).toBeNull();
-  });
-
-  it('shows enqueue failure reasons and the measured delay in recent activity', () => {
-    mocks.getActivity.mockReturnValue({
-      data: {
-        activity: [{
-          id: 1,
-          guildId: 'guild-1',
-          userId: '12345678901234567',
-          roleId,
-          outcome: 'enqueue_failed',
-          delaySeconds: 0,
-          createdAt: new Date().toISOString(),
-        }],
-      },
-      isLoading: false,
-    });
-
-    render(<AutoRolesPage />);
-
-    expect(screen.getByText('enqueue failed')).toBeTruthy();
-    expect(screen.getByText('0s')).toBeTruthy();
   });
 
   it('shows server validation issues on the affected field and keeps the draft unsaved', async () => {

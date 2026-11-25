@@ -6,9 +6,11 @@ import { MetricsModule } from '../metrics/metrics.module';
 import { BotService } from './bot.service';
 import { GuildSyncService } from './guild-sync.service';
 import { ModerationService } from './moderation.service';
+import { EconomyModule } from '../economy/economy.module';
+import { EconomyCommandService } from './economy-command.service';
 
 @Module({
-  imports: [CoreModule, QueueModule, DiscordModule, MetricsModule],
-  providers: [BotService, GuildSyncService, ModerationService],
+  imports: [CoreModule, QueueModule, DiscordModule, MetricsModule, EconomyModule],
+  providers: [BotService, GuildSyncService, ModerationService, EconomyCommandService],
 })
 export class BotModule {}

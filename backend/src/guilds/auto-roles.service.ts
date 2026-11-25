@@ -49,8 +49,7 @@ export interface AutoRoleEventRow {
   guildId: string;
   userId: string;
   roleId: string;
-  outcome: 'assigned' | 'skipped_left' | 'skipped_has_role' | 'skipped_unsafe' | 'failed' | 'enqueue_failed' | 'skipped_pending';
-  delaySeconds: number | null;
+  outcome: 'assigned' | 'skipped_left' | 'skipped_has_role' | 'skipped_unsafe' | 'failed';
   createdAt: string;
 }
 
@@ -296,31 +295,8 @@ export class AutoRolesService {
       userId: row.userId,
       roleId: row.roleId,
       outcome: row.outcome as AutoRoleEventRow['outcome'],
-      delaySeconds: row.delaySeconds,
       createdAt: row.createdAt.toISOString(),
     }));
-  }
-
-  async diagnose(guild: GuildRow): Promise<unknown> {
-    const settings = await this.cache.get(guild.id);
-    const config = normalizeAutoRoleConfig(settings.autoRoles);
-    const roles = await this.guildSync.getRoles(guild.id);
-    const botStatus = await this.guildSync.getBotStatus(guild.id, roles);
-    const view = this.classifyRoles(guild.id, roles, botStatus);
-    const recent = await this.activity(guild.id);
-    const blockedUntil = Number(await this.redis.client.get('discord:blocked_until') ?? 0);
-    return {
-      guildId: guild.id,
-      enabled: config.enabled,
-      delaySeconds: config.delaySeconds,
-      waitForScreening: config.waitForScreening,
-      hasManageRoles: botStatus.manageRoles,
-      role: config.roleIds[0]
-        ? view.assignable.find((role) => role.id === config.roleIds[0]) ?? null
-        : null,
-      discordBlockedUntil: blockedUntil > 0 ? new Date(blockedUntil).toISOString() : null,
-      recent,
-    };
   }
 
   async publishRevision(guildId: string, kind: string, type: string): Promise<void> {

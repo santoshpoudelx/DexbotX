@@ -33,7 +33,7 @@ export class ChannelAccessService {
       const roles = await this.discord.getGuildRoles(guildId);
       let role = roles.find((candidate) => candidate.name === BOT_ROLE_NAME);
       if (!role) {
-        role = await this.discord.createRole(guildId, BOT_ROLE_NAME, PERMISSION_BITS.toString());
+        role = await this.discord.createRole(guildId, BOT_ROLE_NAME, PERMISSION_BITS.toString(), 0, true);
       } else if (role.hoist === false) {
         try {
           role = await this.discord.modifyRole(guildId, role.id, { hoist: true });

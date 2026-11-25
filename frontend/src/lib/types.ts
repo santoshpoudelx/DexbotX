@@ -71,7 +71,9 @@ export interface GuildSettings {
 export interface AutoRoleConfig {
   enabled: boolean;
   roleIds: string[];
-  delaySeconds: number;
+  delayMode: 'smart' | 'fixed';
+  minDelaySeconds: number;
+  fixedDelaySeconds: number;
   skipBots: boolean;
   waitForScreening: boolean;
   announce: {
@@ -101,8 +103,7 @@ export interface AutoRoleActivity {
   guildId: string;
   userId: string;
   roleId: string;
-  outcome: 'assigned' | 'skipped_left' | 'skipped_has_role' | 'skipped_unsafe' | 'failed' | 'enqueue_failed' | 'skipped_pending';
-  delaySeconds: number | null;
+  outcome: 'assigned' | 'skipped_left' | 'skipped_has_role' | 'skipped_unsafe' | 'failed';
   createdAt: string;
 }
 
@@ -137,6 +138,66 @@ export interface Preset {
   description: string;
   kind: MessageKind;
   config: MessageContent;
+}
+
+export interface EconomySettings {
+  currencyName: string;
+  economyName: string;
+  dailyAmount: number;
+  streakStep: number;
+  streakCapDays: number;
+  dailyBoostBonus: number;
+  stealAmount: number;
+  minSteal: number;
+  protectionThreshold: number;
+  weeklyGiftSendLimit: number;
+  weeklyGiftReceiveLimit: number;
+  minAccountAgeDays: number;
+  minServerHours: number;
+  bountyMin: number;
+  bountyMax: number;
+  commandCooldownSeconds: number;
+  timezone: string;
+  heistAnnounceChannelId: string | null;
+  pingVictim: boolean;
+  mirrorHeistsToAnnouncements: boolean;
+  announcementEvents: {
+    gifts: boolean;
+    rolePurchases: boolean;
+    customTitles: boolean;
+    streakMilestones: boolean;
+  };
+}
+
+export interface EconomyState {
+  enabled: boolean;
+  paused: boolean;
+  channels: Record<string, string | null>;
+  missing: string[];
+  walletCount: number;
+}
+
+export interface EconomyItem {
+  id: number;
+  guildId: string;
+  itemId: string;
+  kind: string;
+  name: string;
+  description: string;
+  price: number;
+  roleId: string | null;
+  stock: number | null;
+  enabled: boolean;
+  isDefault: boolean;
+  sortOrder: number;
+}
+
+export interface EconomySafeRole {
+  id: string;
+  name: string;
+  color: number;
+  position: number;
+  reason: string | null;
 }
 
 export interface ApiErrorBody {

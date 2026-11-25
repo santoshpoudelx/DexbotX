@@ -1,14 +1,15 @@
 'use client';
 
-import { Bell, CircleCheck, FileText, LogOut, Music, ShieldCheck, UserPlus, Users } from 'lucide-react';
-import { Card } from '@/components/ui/misc';
-import { useGetChannelsQuery, useGetGuildQuery } from '@/store/api';
+import { Bell, CircleCheck, Coins, FileText, LogOut, Music, ShieldCheck, UserPlus, Users } from 'lucide-react';
+import { Badge, Card } from '@/components/ui/misc';
+import { useGetChannelsQuery, useGetEconomyQuery, useGetGuildQuery } from '@/store/api';
 import { OverviewSkeleton } from './loading-skeleton';
 import { ModuleCard, PageHeader, StatusPill } from './ui';
 
 export function OverviewContent({ guildId }: { guildId: string }) {
   const { data, isLoading } = useGetGuildQuery(guildId);
   const { data: channels } = useGetChannelsQuery(guildId);
+  const { data: economy, isLoading: economyLoading, error: economyError } = useGetEconomyQuery(guildId);
 
   if (isLoading || !data) {
     return <OverviewSkeleton />;
@@ -22,6 +23,24 @@ export function OverviewContent({ guildId }: { guildId: string }) {
   const welcome = data.settings.welcome;
   const goodbye = data.settings.goodbye;
   const autoRoles = data.autoRoles.config;
+  const economyStatus = economyError
+    ? 'Unavailable'
+    : economyLoading
+      ? 'Loading'
+      : economy?.state.paused
+        ? 'Paused'
+        : economy?.state.enabled
+          ? 'Enabled'
+          : 'Disabled';
+  const economyDescription = economyError
+    ? 'Could not load Economy status. Open settings to retry.'
+    : economyLoading
+      ? 'Loading Economy status…'
+      : economy?.state.paused
+        ? 'Economy is paused for this server.'
+        : economy?.state.enabled
+          ? 'Economy is active for this server.'
+          : 'Economy is disabled for this server.';
 
   return (
     <>
@@ -30,6 +49,18 @@ export function OverviewContent({ guildId }: { guildId: string }) {
         <ModuleCard title="Welcome messages" description={channelName(welcome.channelId)} icon={UserPlus} status={<StatusPill on={welcome.enabled} />} href={`/dashboard/${guildId}/welcome`} actionLabel="Configure" />
         <ModuleCard title="Goodbye messages" description={channelName(goodbye.channelId)} icon={LogOut} status={<StatusPill on={goodbye.enabled} />} href={`/dashboard/${guildId}/goodbye`} actionLabel="Configure" />
         <ModuleCard title="Auto Roles" description="Assign a role automatically when members join." icon={Users} status={<StatusPill on={autoRoles.enabled} />} href={`/dashboard/${guildId}/auto-roles`} actionLabel="Configure Auto Roles" />
+        <ModuleCard
+          title="Economy"
+          description={economyDescription}
+          icon={Coins}
+          status={(
+            <Badge tone={economyStatus === 'Enabled' ? 'success' : economyStatus === 'Paused' ? 'warning' : 'neutral'}>
+              {economyStatus}
+            </Badge>
+          )}
+          href={`/dashboard/${guildId}/economy`}
+          actionLabel="Configure Economy"
+        />
         <Card className="flex min-h-52 flex-col p-5">
           <div className="flex items-start justify-between gap-3">
             <div className="grid size-10 place-items-center rounded-lg bg-muted text-success"><CircleCheck aria-hidden="true" className="size-5" /></div>

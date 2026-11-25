@@ -1,52 +1,43 @@
 import {
-  AUTO_ROLE_MAX_DELAY_SECONDS,
   computeAutoRoleDelay,
   defaultAutoRoleConfig,
   getAutoRoleSafetyReason,
   normalizeAutoRoleConfig,
   renderAutoRoleTemplate,
-  secondsToMilliseconds,
   validateAutoRoleTemplate,
 } from './auto-roles';
-import { makeJobId } from './job-id';
 
 describe('auto-role helpers', () => {
-  it('creates BullMQ-safe job ids', () => {
-    expect(makeJobId('autorole', '900000000000000002', '900000000000000003', 123)).toBe(
-      'autorole-900000000000000002-900000000000000003-123',
-    );
-    expect(() => makeJobId('autorole', 'guild:user')).toThrow();
-    expect(() => makeJobId('123456')).toThrow();
-  });
-  it('uses extra delay and clamps it to 30 seconds', () => {
+  it('uses quiet smart timing and clamps fixed timing', () => {
     expect(computeAutoRoleDelay({
-      delaySeconds: 0, nextFreeSlotSeconds: 0,
+      mode: 'smart', minDelaySeconds: 0, fixedDelaySeconds: 0,
+      joinsLastMinute: 1, queueWaiting: 2, discordBlockedSeconds: 0,
+      nextFreeSlotSeconds: 0, jitterSeed: 0,
     })).toBe(0);
     expect(computeAutoRoleDelay({
-      delaySeconds: 20, nextFreeSlotSeconds: 0,
+      mode: 'smart', minDelaySeconds: 20, fixedDelaySeconds: 0,
+      joinsLastMinute: 1, queueWaiting: 2, discordBlockedSeconds: 0,
+      nextFreeSlotSeconds: 0, jitterSeed: 0,
     })).toBe(20);
     expect(computeAutoRoleDelay({
-      delaySeconds: 0, nextFreeSlotSeconds: 2,
+      mode: 'smart', minDelaySeconds: 0, fixedDelaySeconds: 0,
+      joinsLastMinute: 2, queueWaiting: 0, discordBlockedSeconds: 0,
+      nextFreeSlotSeconds: 2, jitterSeed: 0,
     })).toBe(2);
     expect(computeAutoRoleDelay({
-      delaySeconds: 900, nextFreeSlotSeconds: 0,
-    })).toBe(30);
+      mode: 'fixed', minDelaySeconds: 0, fixedDelaySeconds: 900,
+      joinsLastMinute: 0, queueWaiting: 0, discordBlockedSeconds: 0,
+      nextFreeSlotSeconds: 0,
+    })).toBe(480);
   });
 
-  it('spreads 30 slots across unique seconds and caps all load inputs', () => {
-    const burst = Array.from({ length: 30 }, (_, slot) => computeAutoRoleDelay({
-      delaySeconds: 0,
-      nextFreeSlotSeconds: slot,
-    }));
-    expect(burst).toEqual(Array.from({ length: 30 }, (_, index) => index));
-    const loadedDelays = Array.from({ length: 1001 }, (_, slot) => computeAutoRoleDelay({
-      delaySeconds: 3,
-      nextFreeSlotSeconds: slot,
-    }));
-    expect(Math.max(...loadedDelays)).toBe(AUTO_ROLE_MAX_DELAY_SECONDS);
-    expect(AUTO_ROLE_MAX_DELAY_SECONDS).toBe(30);
-    expect(secondsToMilliseconds(30)).toBe(30000);
-    expect(() => secondsToMilliseconds(Number.NaN)).toThrow();
+  it('spreads loaded joins and never exceeds the 480-second cap', () => {
+    const result = computeAutoRoleDelay({
+      mode: 'smart', minDelaySeconds: 30, fixedDelaySeconds: 0,
+      joinsLastMinute: 100, queueWaiting: 100, discordBlockedSeconds: 100,
+      nextFreeSlotSeconds: 500, jitterSeed: 1,
+    });
+    expect(result).toBe(480);
   });
 
   it('normalizes old-format rows, preserves the first role, and always uses smart timing', () => {
@@ -59,26 +50,24 @@ describe('auto-role helpers', () => {
       skipBots: false,
     });
     expect(normalized.roleIds).toEqual(['123456789012345678']);
-    expect(normalized.delaySeconds).toBe(30);
+    expect(normalized.delayMode).toBe('smart');
+    expect(normalized.minDelaySeconds).toBe(0);
+    expect(normalized.fixedDelaySeconds).toBe(0);
     expect(normalized.skipBots).toBe(false);
     expect(normalizeAutoRoleConfig({
       delayMode: 'instant',
       delaySeconds: 45,
-    }).delaySeconds).toBe(30);
+    }).fixedDelaySeconds).toBe(0);
     expect(normalizeAutoRoleConfig({
+      ...defaultAutoRoleConfig(),
       delayMode: 'fixed',
       minDelaySeconds: 30,
       fixedDelaySeconds: 90,
-    })).toMatchObject({ delaySeconds: 30 });
-    expect(normalizeAutoRoleConfig({
+    })).toMatchObject({
       delayMode: 'smart',
-      minDelaySeconds: 15,
-      fixedDelaySeconds: 25,
-    }).delaySeconds).toBe(15);
-    expect(normalizeAutoRoleConfig({
-      ...defaultAutoRoleConfig(),
-      waitForScreening: false,
-    }).waitForScreening).toBe(true);
+      minDelaySeconds: 0,
+      fixedDelaySeconds: 0,
+    });
   });
 
   it('rejects unknown variables and escalations', () => {

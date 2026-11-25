@@ -30,6 +30,34 @@ export function EditorSkeleton({ title = 'Welcome message', description = 'Sent 
   );
 }
 
+export function EconomySkeleton() {
+  return (
+    <section aria-busy="true" aria-label="Loading Economy configuration" role="status" className="space-y-6">
+      <header className="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-semibold">Economy</h1>
+          <p className="mt-1 text-sm text-muted-foreground">Manage the economy and set Dex prices for purchasable server roles.</p>
+        </div>
+        <Skeleton className="h-9 w-24" />
+      </header>
+      <Skeleton className="h-28" />
+      <div className="space-y-4 rounded-xl border border-border bg-card p-5">
+        <div className="space-y-2">
+          <Skeleton className="h-5 w-36" />
+          <Skeleton className="h-4 w-3/4" />
+        </div>
+        <div className="grid gap-4 sm:grid-cols-[1fr_180px_auto]">
+          <Skeleton className="h-10" />
+          <Skeleton className="h-10" />
+          <Skeleton className="h-10 w-36" />
+        </div>
+        <Skeleton className="h-16" />
+        <Skeleton className="h-16" />
+      </div>
+    </section>
+  );
+}
+
 export function OverviewSkeleton() {
   return (
     <section aria-busy="true" aria-label="Loading overview" className="space-y-6">

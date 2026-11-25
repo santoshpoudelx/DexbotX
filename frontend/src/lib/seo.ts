@@ -247,7 +247,7 @@ export const PUBLIC_PAGE_SEO = {
   features: {
     title: 'DexBotX: Discord Bot Features and Easy Dashboard Setup',
     description:
-      'Explore DexBotX: a free, open-source Discord bot for anti-spam, social notifications, AI auto chat, auto roles, welcome and goodbye, auto moderation, and easy dashboard setup.',
+      'Explore DexBotX: a free, open-source Discord bot for moderation, auto roles, welcome and goodbye, and an opt-in Dex economy with store roles.',
     keywords: ['DexBotX features', 'Discord bot features', 'Discord bot dashboard'],
   },
   about: {
