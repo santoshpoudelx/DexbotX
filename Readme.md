@@ -10,6 +10,7 @@ DexBotX is an all-in-one Discord community bot built to help servers stay safer,
 - **Social Notifications**
 - **AI Auto Chat**
 - **Auto Roles**
+- **economy & store**
 - **Welcome and Goodbye**
 - **Auto Moderation** (coming soon; moderation slash commands are available)
 - **Web Dashboard Easy Setup**
