@@ -68,7 +68,7 @@ Planned or not implemented in the current code:
 - Supabase Storage is optional for private custom card backgrounds.
 - Render is represented by `backend/render.yaml`; Dockerfiles exist for both packages.
 - Frontend production output is Next standalone; frontend is designed for Vercel and container hosts.
-- GitHub Actions provide backend/frontend CI, CodeQL, npm audit, Gitleaks, Semgrep, and secret checks.
+- GitHub Actions run backend/frontend CI on pushes to all branches and pull requests targeting `main`, with path filters for package changes. Security scans run on all branch pushes and pull requests targeting `main`; Vercel Git-triggered deployments remain restricted to `main`.
 
 ## 3. High-Level Architecture
 
@@ -166,7 +166,7 @@ The bot, API, and worker are separate long-lived processes sharing PostgreSQL an
 │   ├── package-lock.json
 │   ├── Dockerfile                    # Standalone Next.js container
 │   ├── .env.example                  # Frontend environment template
-│   ├── vercel.json                   # Vercel Git deployments restricted to main
+│   ├── vercel.json                   # Vercel Git deployments restricted to main; preview branches disabled
 │   ├── next.config.mjs               # Standalone output, CSP, proxy/build settings
 │   ├── src/app/                      # Next App Router pages/routes
 │   │   └── dashboard/[guildId]/auto-roles/
@@ -776,8 +776,9 @@ Use a fresh disposable Redis container for each E2E run. If reusing a test-only 
 | 2026-11-24 | Fixed API E2E cache isolation, onboarding and permission fixtures, reduced unused Redis connections in bot/worker processes, hoisted permission-repair roles, and separated API/economy E2E commands | `backend/test/api.e2e-spec.ts`; `backend/src/discord/channel-access.service.ts`; `backend/src/discord/discord-rest.service.ts`; `backend/src/redis/redis.service.ts`; `backend/package.json`; `backend/jest.e2e.config.js`; related tests |
 | 2026-11-24 | Added the 0007 Auto Roles SQL to the Drizzle journal before 0008, updated migration guidance, reconciled Economy tables/routes and removed stale merge-conflict text; made Economy setup database failures explicit | `backend/drizzle/0007_auto_roles_30_seconds.sql`; `backend/drizzle/meta/_journal.json`; `backend/src/economy/economy-setup.service.ts`; `backend/src/bot/economy-command.service.ts`; `backend/test/api.e2e-spec.ts`; this guide |
 | 2026-11-24 | Updated Economy @everyone category permissions and channel-specific read-only overrides; repaired the requested six-channel order | `backend/src/economy/economy-setup.service.ts`; `backend/src/economy/economy-setup.service.spec.ts`; `docs/economy/ECONOMY_DESIGN.md`; `docs/economy/MANUAL_TEST.md`; `docs/economy/TESTING.md`; `docs/economy/OPERATIONS.md`; this guide |
+| 2026-11-25 | Run backend/frontend CI and security scans on all branch pushes while keeping pull-request checks limited to `main`; retain Vercel deployments only on `main` | `.github/workflows/backend-ci.yml`; `.github/workflows/frontend-ci.yml`; `.github/workflows/security.yml`; this guide |
 | 2026-11-24 | Rotate Store and Rules messages when Discord's old-message edit limit is reached, and skip retries for this permanent 429 | `backend/src/economy/economy-message.service.ts`; `backend/src/economy/economy-message.service.spec.ts`; `backend/src/discord/discord-rest.service.ts`; `backend/src/discord/discord-rest.service.spec.ts`; `docs/economy/OPERATIONS.md`; this guide |
 
 ## 15. Last updated
 
-2026-11-24
+2026-11-25
