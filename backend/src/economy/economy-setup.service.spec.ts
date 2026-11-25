@@ -86,6 +86,7 @@ function createHarness(existing?: Record<string, unknown>, selectError?: Error) 
     },
   };
   const messages = {
+    invalidateSettingsCache: jest.fn(),
     updateRules: jest.fn().mockResolvedValue(undefined),
     updateStore: jest.fn().mockResolvedValue(undefined),
     refreshLeaderboard: jest.fn().mockResolvedValue(undefined),

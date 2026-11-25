@@ -204,5 +204,6 @@ describe('auto-role helpers', () => {
 
     expect(getAutoRoleSafetyReason('100000000000000000', samePositionBelow, botStatus)).toBeNull();
     expect(getAutoRoleSafetyReason('100000000000000000', samePositionAbove, botStatus)).toBe('above the bot\'s role');
+    expect(getAutoRoleSafetyReason('100000000000000000', { ...samePositionBelow, id: botStatus.highestRoleId }, botStatus)).toBe('above the bot\'s role');
   });
 });

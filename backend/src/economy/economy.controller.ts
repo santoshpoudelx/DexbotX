@@ -1,7 +1,8 @@
-import { BadRequestException, Body, Controller, Delete, ForbiddenException, Get, Param, Post, Put, Req, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, ForbiddenException, Get, Inject, Param, Post, Put, Req, UseGuards } from '@nestjs/common';
 import { PermissionFlagsBits } from 'discord.js';
 import { and, eq } from 'drizzle-orm';
 import { z } from 'zod';
+import { APP_CONFIG, type AppConfig } from '../core/config';
 import { DatabaseService } from '../db/database.service';
 import { economySettings, economyAuditLog, shopItems } from '../db/schema';
 import { GuildAccessGuard } from '../guilds/guild-access.guard';
@@ -11,13 +12,14 @@ import { ECONOMY_LIMITS } from './economy.constants';
 import { RateLimit } from '../common/decorators';
 import { EconomySetupService } from './economy-setup.service';
 import { economySettingsSchema, defaultEconomySettings, type EconomySettings } from './economy.schema';
-import { DiscordRestService } from '../discord/discord-rest.service';
-import { roleSafetyReason } from './economy-safety';
+import { DiscordRestService, type DiscordRole } from '../discord/discord-rest.service';
+import { isBotOrManagedRole, roleSafetyReason } from './economy-safety';
 import { EconomyMessageService } from './economy-message.service';
+import { compareAutoRoleHierarchy } from '../shared/auto-roles';
 
 const shopItemSchema = z.object({
   itemId: z.string().min(1).max(64).optional(),
-  kind: z.enum(['shield', 'rob_more', 'lockpick', 'decoy', 'bounty', 'daily_boost', 'custom_title', 'role']),
+  kind: z.enum(['shield', 'rob_more', 'lockpick', 'decoy', 'bounty', 'daily_boost', 'custom_title', 'randomdex', 'role']),
   name: z.string().trim().min(1).max(100),
   description: z.string().max(300).default(''),
   price: z.number().int().min(ECONOMY_LIMITS.itemPrice[0]).max(ECONOMY_LIMITS.itemPrice[1]),
@@ -26,21 +28,37 @@ const shopItemSchema = z.object({
   enabled: z.boolean(),
 }).strict();
 
+function findHighestBotRole(roles: DiscordRole[], botRoleIds: string[]): DiscordRole | undefined {
+  return roles
+    .filter((role) => botRoleIds.includes(role.id))
+    .reduce<DiscordRole | undefined>(
+      (highest, role) => (!highest || compareAutoRoleHierarchy(role, highest) > 0 ? role : highest),
+      undefined,
+    );
+}
+
 @Controller('guilds/:guildId/economy')
 @UseGuards(GuildAccessGuard)
 export class EconomyController {
   constructor(
+    @Inject(APP_CONFIG) private readonly config: AppConfig,
     private readonly setup: EconomySetupService,
     private readonly database: DatabaseService,
     private readonly discord: DiscordRestService,
     private readonly messages: EconomyMessageService,
   ) {}
 
+  private botClientId(): string {
+    return this.config.discordClientId || process.env.DISCORD_CLIENT_ID || '';
+  }
+
   private async ensureEconomyAdmin(guildId: string, req: AuthedRequest): Promise<void> {
     const guild = req.guild!;
     if (guild.ownerId === req.session!.userId) return;
-    const roles = await this.discord.getGuildRoles(guildId);
-    const member = await this.discord.getGuildMember(guildId, req.session!.userId);
+    const [roles, member] = await Promise.all([
+      this.discord.getGuildRoles(guildId),
+      this.discord.getGuildMember(guildId, req.session!.userId),
+    ]);
     let permissions = 0n;
     for (const role of roles) {
       if (role.id === guildId || member.roles.includes(role.id)) {
@@ -101,8 +119,7 @@ export class EconomyController {
 
   @Get('items')
   async items(@Param('guildId') guildId: string) {
-    return { items: await this.database.db.select().from(shopItems)
-      .where(eq(shopItems.guildId, guildId)).orderBy(shopItems.sortOrder) };
+    return { items: await this.setup.getItems(guildId) };
   }
 
   @Post('items')
@@ -113,29 +130,33 @@ export class EconomyController {
   ) {
     if (body.kind === 'role') {
       if (!body.roleId) throw new BadRequestException('A role is required for role items.');
-      const roles = await this.discord.getGuildRoles(guildId);
+      const [roles, botMember] = await Promise.all([
+        this.discord.getGuildRoles(guildId),
+        this.discord.getGuildMember(guildId, this.botClientId()),
+      ]);
       const role = roles.find((item) => item.id === body.roleId);
       if (!role) throw new BadRequestException('Role not found.');
-      const botMember = await this.discord.getGuildMember(guildId, (process.env.DISCORD_CLIENT_ID ?? ''));
-      const botHighestPosition = Math.max(...roles.filter((item) => botMember.roles.includes(item.id)).map((item) => item.position), -1);
-      const reason = roleSafetyReason({ ...role, position: role.position }, guildId, botHighestPosition);
+      const highestBotRole = findHighestBotRole(roles, botMember.roles);
+      const reason = roleSafetyReason(role, guildId, highestBotRole?.position ?? -1, highestBotRole?.id ?? null);
       if (reason) throw new BadRequestException(reason);
     }
     const existing = await this.database.db.select({ id: shopItems.id }).from(shopItems)
       .where(eq(shopItems.guildId, guildId)).orderBy(shopItems.sortOrder);
     const itemId = body.itemId ?? `item-${Date.now()}-${existing.length}`;
-    await this.database.db.insert(shopItems).values({
+    const [created] = await this.database.db.insert(shopItems).values({
       guildId, itemId, kind: body.kind, name: body.name, description: body.description,
       price: body.price, roleId: body.roleId ?? null, stock: body.stock ?? null,
       enabled: body.enabled, isDefault: false, sortOrder: existing.length,
-    });
-    await this.database.db.insert(economyAuditLog).values({
-      guildId, actorId: req.session!.userId, source: 'dashboard', action: 'economy.item.create',
-      after: body as unknown as Record<string, unknown>,
-    });
+    }).returning();
+    await Promise.all([
+      this.database.db.insert(economyAuditLog).values({
+        guildId, actorId: req.session!.userId, source: 'dashboard', action: 'economy.item.create',
+        after: body as unknown as Record<string, unknown>,
+      }),
+      this.setup.invalidateCache(guildId),
+    ]);
     this.messages.scheduleStoreAndRulesSync(guildId, req.guild!.name);
-    await this.setup.invalidateCache(guildId);
-    return { ok: true };
+    return { ok: true, item: created };
   }
 
   @Put('items/:itemId')
@@ -145,20 +166,22 @@ export class EconomyController {
     @Req() req: AuthedRequest,
     @Body(new ZodValidationPipe(shopItemSchema.partial())) body: Partial<z.infer<typeof shopItemSchema>>,
   ) {
-    await this.database.db.update(shopItems).set({
-      ...(body.name !== undefined ? { name: body.name } : {}),
-      ...(body.description !== undefined ? { description: body.description } : {}),
-      ...(body.price !== undefined ? { price: body.price } : {}),
-      ...(body.enabled !== undefined ? { enabled: body.enabled } : {}),
-      ...(body.stock !== undefined ? { stock: body.stock } : {}),
-      ...(body.roleId !== undefined ? { roleId: body.roleId } : {}),
-    }).where(and(eq(shopItems.guildId, guildId), eq(shopItems.itemId, itemId)));
-    await this.database.db.insert(economyAuditLog).values({
-      guildId, actorId: req.session!.userId, source: 'dashboard', action: 'economy.item.update',
-      after: body as unknown as Record<string, unknown>,
-    });
-    this.messages.scheduleStoreAndRulesSync(guildId, req.guild!.name);
+    await Promise.all([
+      this.database.db.update(shopItems).set({
+        ...(body.name !== undefined ? { name: body.name } : {}),
+        ...(body.description !== undefined ? { description: body.description } : {}),
+        ...(body.price !== undefined ? { price: body.price } : {}),
+        ...(body.enabled !== undefined ? { enabled: body.enabled } : {}),
+        ...(body.stock !== undefined ? { stock: body.stock } : {}),
+        ...(body.roleId !== undefined ? { roleId: body.roleId } : {}),
+      }).where(and(eq(shopItems.guildId, guildId), eq(shopItems.itemId, itemId))),
+      this.database.db.insert(economyAuditLog).values({
+        guildId, actorId: req.session!.userId, source: 'dashboard', action: 'economy.item.update',
+        after: body as unknown as Record<string, unknown>,
+      }),
+    ]);
     await this.setup.invalidateCache(guildId);
+    this.messages.scheduleStoreAndRulesSync(guildId, req.guild!.name);
     return { ok: true };
   }
 
@@ -178,39 +201,53 @@ export class EconomyController {
           .where(and(eq(shopItems.guildId, guildId), eq(shopItems.itemId, itemId)));
       }
     });
-    await this.database.db.insert(economyAuditLog).values({
-      guildId, actorId: req.session!.userId, source: 'dashboard', action: 'economy.items.reorder',
-      after: { itemIds: body.itemIds },
-    });
+    await Promise.all([
+      this.database.db.insert(economyAuditLog).values({
+        guildId, actorId: req.session!.userId, source: 'dashboard', action: 'economy.items.reorder',
+        after: { itemIds: body.itemIds },
+      }),
+      this.setup.invalidateCache(guildId),
+    ]);
     this.messages.scheduleStoreAndRulesSync(guildId, req.guild!.name);
-    await this.setup.invalidateCache(guildId);
     return { ok: true };
   }
 
   @Delete('items/:itemId')
   async deleteItem(@Param('guildId') guildId: string, @Param('itemId') itemId: string, @Req() req: AuthedRequest) {
-    await this.database.db.delete(shopItems).where(and(eq(shopItems.guildId, guildId), eq(shopItems.itemId, itemId)));
-    await this.database.db.insert(economyAuditLog).values({
-      guildId, actorId: req.session!.userId, source: 'dashboard', action: 'economy.item.delete',
-      after: { itemId },
-    });
-    this.messages.scheduleStoreAndRulesSync(guildId, req.guild!.name);
+    await Promise.all([
+      this.database.db.delete(shopItems).where(and(eq(shopItems.guildId, guildId), eq(shopItems.itemId, itemId))),
+      this.database.db.insert(economyAuditLog).values({
+        guildId, actorId: req.session!.userId, source: 'dashboard', action: 'economy.item.delete',
+        after: { itemId },
+      }),
+    ]);
     await this.setup.invalidateCache(guildId);
+    this.messages.scheduleStoreAndRulesSync(guildId, req.guild!.name);
     return { ok: true };
   }
 
   @Get('roles')
   async safeRoles(@Param('guildId') guildId: string) {
-    const roles = await this.discord.getGuildRoles(guildId);
-    const botMember = await this.discord.getGuildMember(guildId, process.env.DISCORD_CLIENT_ID ?? '');
-    const botHighestPosition = Math.max(...roles.filter((role) => botMember.roles.includes(role.id)).map((role) => role.position), -1);
-    return { roles: roles.map((role) => ({
-      id: role.id,
-      name: role.name,
-      color: role.color,
-      position: role.position,
-      reason: roleSafetyReason(role, guildId, botHighestPosition),
-    })).filter((role) => role.id !== guildId).sort((a, b) => b.position - a.position) };
+    const [roles, botMember] = await Promise.all([
+      this.discord.getGuildRoles(guildId),
+      this.discord.getGuildMember(guildId, this.botClientId()),
+    ]);
+    const highestBotRole = findHighestBotRole(roles, botMember.roles);
+    const botHighestPosition = highestBotRole?.position ?? -1;
+    const botHighestRoleId = highestBotRole?.id ?? null;
+
+    return {
+      roles: roles
+        .filter((role) => role.id !== guildId && !isBotOrManagedRole(role))
+        .map((role) => ({
+          id: role.id,
+          name: role.name,
+          color: role.color,
+          position: role.position,
+          reason: roleSafetyReason(role, guildId, botHighestPosition, botHighestRoleId),
+        }))
+        .sort((a, b) => b.position - a.position),
+    };
   }
 
   @Post('delete-channels')
@@ -223,22 +260,31 @@ export class EconomyController {
     const rows = await this.database.db.select().from(economySettings).where(eq(economySettings.guildId, guildId)).limit(1);
     const row = rows[0];
     if (!row) return { ok: true };
-    for (const id of [row.rulesChannelId, row.commandsChannelId, row.leaderboardChannelId, row.storeChannelId, row.heistLogChannelId, row.announcementsChannelId, row.categoryId]) {
-      if (id) await this.discord.deleteGuildChannel(id).catch(() => undefined);
-    }
-    await this.database.db.update(economySettings).set({
-      enabled: false,
-      categoryId: null,
-      rulesChannelId: null,
-      commandsChannelId: null,
-      leaderboardChannelId: null,
-      storeChannelId: null,
-      heistLogChannelId: null,
-      announcementsChannelId: null,
-    }).where(eq(economySettings.guildId, guildId));
-    await this.database.db.insert(economyAuditLog).values({
-      guildId, actorId: req.session!.userId, source: 'dashboard', action: 'economy.channels.delete',
-    });
+    const channelIds = [
+      row.rulesChannelId,
+      row.commandsChannelId,
+      row.leaderboardChannelId,
+      row.storeChannelId,
+      row.heistLogChannelId,
+      row.announcementsChannelId,
+      row.categoryId,
+    ].filter((id): id is string => Boolean(id));
+    await Promise.all(channelIds.map((id) => this.discord.deleteGuildChannel(id).catch(() => undefined)));
+    await Promise.all([
+      this.database.db.update(economySettings).set({
+        enabled: false,
+        categoryId: null,
+        rulesChannelId: null,
+        commandsChannelId: null,
+        leaderboardChannelId: null,
+        storeChannelId: null,
+        heistLogChannelId: null,
+        announcementsChannelId: null,
+      }).where(eq(economySettings.guildId, guildId)),
+      this.database.db.insert(economyAuditLog).values({
+        guildId, actorId: req.session!.userId, source: 'dashboard', action: 'economy.channels.delete',
+      }),
+    ]);
     await this.setup.invalidateCache(guildId);
     return { ok: true };
   }

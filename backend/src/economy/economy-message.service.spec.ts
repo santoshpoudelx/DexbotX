@@ -72,8 +72,8 @@ describe('EconomyMessageService bounty announcements', () => {
     await pending;
 
     expect(discord.createChannelMessage).toHaveBeenCalledWith(channelId, {
-      content: `100 Dex bounty has been set on <@${targetId}>.`,
-      allowed_mentions: { parse: [] },
+      content: `<@${targetId}> someone put a bounty of 100 Dex!`,
+      allowed_mentions: { parse: [], users: [targetId] },
     });
   });
 
@@ -201,6 +201,19 @@ describe('EconomyMessageService bounty announcements', () => {
 
     expect(discord.createChannelMessage).toHaveBeenCalledWith(channelId, {
       content: `<@${robberId}> claimed 100 Dex by robbing <@${targetId}>.`,
+      allowed_mentions: { parse: [] },
+    });
+  });
+
+  it('announces successful robbery with total stolen dex and emoji', async () => {
+    const { service, discord } = createService();
+    const pending = service.postRobSuccessAnnouncement(guildId, robberId, targetId, 250);
+
+    await jest.advanceTimersByTimeAsync(800);
+    await pending;
+
+    expect(discord.createChannelMessage).toHaveBeenCalledWith(channelId, {
+      content: `<@${robberId}> robbed <@${targetId}> 250 Dex 😂`,
       allowed_mentions: { parse: [] },
     });
   });

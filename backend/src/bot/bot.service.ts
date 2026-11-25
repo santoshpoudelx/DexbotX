@@ -88,7 +88,7 @@ export class BotService implements OnApplicationBootstrap, OnApplicationShutdown
       if (!interaction.guild) return;
       if (interaction.isChatInputCommand()) {
         const economyNames = new Set([
-          'economy', 'reward', 'balance', 'shop', 'store', 'buy', 'gift', 'robuser', 'leaderboard',
+          'economy', 'reward', 'balance', 'shop', 'store', 'buy', 'gift', 'senddex', 'get5kdex', 'robuser', 'leaderboard',
         ]);
         void this.safe('economy-command', async () => {
           if (!economyNames.has(interaction.commandName)) {
@@ -112,7 +112,7 @@ export class BotService implements OnApplicationBootstrap, OnApplicationShutdown
       if (interaction.isButton()) {
         void this.safe('economy-button', () => this.economyCommands?.handleButton(interaction) ?? Promise.resolve());
       }
-      if (interaction.isStringSelectMenu()) {
+      if (interaction.isStringSelectMenu() || interaction.isUserSelectMenu()) {
         void this.safe('economy-select', () => this.economyCommands?.handleSelectMenu(interaction) ?? Promise.resolve());
       }
       if (interaction.isModalSubmit()) {
@@ -187,7 +187,15 @@ export class BotService implements OnApplicationBootstrap, OnApplicationShutdown
       void this.safe('welcome', () => this.handleMember('welcome', member))
         .then(() => this.safe('auto-role', () => this.handleAutoRoleMemberJoin(member)));
     });
-    c.on(Events.GuildMemberUpdate, (oldMember, member) => this.safe('auto-role-update', () => this.handleAutoRoleMemberUpdate(oldMember, member)));
+    c.on(Events.GuildMemberUpdate, (oldMember, member) => this.safe('member-update', async () => {
+      if (this.client.user && member.id === this.client.user.id) {
+        await Promise.all([
+          this.sync.refreshBotStatusFromGateway(member.guild),
+          this.redis.client.del(`discord:cache:member:${member.guild.id}:${member.id}`),
+        ]);
+      }
+      await this.handleAutoRoleMemberUpdate(oldMember, member);
+    }));
     c.on(Events.GuildMemberRemove, (m) => this.safe('goodbye', async () => {
       await this.redis.client.del(
         this.memberRolesKey(m.guild.id, m.id),

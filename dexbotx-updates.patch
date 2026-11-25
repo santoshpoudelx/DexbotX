@@ -1,0 +1,2024 @@
+diff --git a/backend/src/bot/bot.service.ts b/backend/src/bot/bot.service.ts
+index c8e1beb..3cb16d3 100644
+--- a/backend/src/bot/bot.service.ts
++++ b/backend/src/bot/bot.service.ts
+@@ -88,7 +88,7 @@ export class BotService implements OnApplicationBootstrap, OnApplicationShutdown
+       if (!interaction.guild) return;
+       if (interaction.isChatInputCommand()) {
+         const economyNames = new Set([
+-          'economy', 'reward', 'balance', 'shop', 'store', 'buy', 'gift', 'robuser', 'leaderboard',
++          'economy', 'reward', 'balance', 'shop', 'store', 'buy', 'gift', 'senddex', 'get5kdex', 'robuser', 'leaderboard',
+         ]);
+         void this.safe('economy-command', async () => {
+           if (!economyNames.has(interaction.commandName)) {
+@@ -187,7 +187,15 @@ export class BotService implements OnApplicationBootstrap, OnApplicationShutdown
+       void this.safe('welcome', () => this.handleMember('welcome', member))
+         .then(() => this.safe('auto-role', () => this.handleAutoRoleMemberJoin(member)));
+     });
+-    c.on(Events.GuildMemberUpdate, (oldMember, member) => this.safe('auto-role-update', () => this.handleAutoRoleMemberUpdate(oldMember, member)));
++    c.on(Events.GuildMemberUpdate, (oldMember, member) => this.safe('member-update', async () => {
++      if (this.client.user && member.id === this.client.user.id) {
++        await Promise.all([
++          this.sync.refreshBotStatusFromGateway(member.guild),
++          this.redis.client.del(`discord:cache:member:${member.guild.id}:${member.id}`),
++        ]);
++      }
++      await this.handleAutoRoleMemberUpdate(oldMember, member);
++    }));
+     c.on(Events.GuildMemberRemove, (m) => this.safe('goodbye', async () => {
+       await this.redis.client.del(
+         this.memberRolesKey(m.guild.id, m.id),
+diff --git a/backend/src/bot/commands/economy.ts b/backend/src/bot/commands/economy.ts
+index 8a77617..521516c 100644
+--- a/backend/src/bot/commands/economy.ts
++++ b/backend/src/bot/commands/economy.ts
+@@ -9,6 +9,11 @@ export const buyCommand = new SlashCommandBuilder().setName('buy').setDescriptio
+ export const giftCommand = new SlashCommandBuilder().setName('gift').setDescription('Gift Dex to another member').setContexts(InteractionContextType.Guild)
+   .addUserOption((option) => option.setName('user').setDescription('Member to receive the gift').setRequired(true))
+   .addIntegerOption((option) => option.setName('amount').setDescription('Amount in Dex to gift').setRequired(true).setMinValue(1).setMaxValue(2000));
++export const sendDexCommand = new SlashCommandBuilder().setName('senddex').setDescription('Send any amount of Dex from your vault to another member').setContexts(InteractionContextType.Guild)
++  .addUserOption((option) => option.setName('user').setDescription('Member to receive Dex').setRequired(true))
++  .addIntegerOption((option) => option.setName('amount').setDescription('Amount of Dex to send from your vault').setRequired(true).setMinValue(1).setMaxValue(1_000_000_000));
++export const get5kDexCommand = new SlashCommandBuilder().setName('get5kdex').setDescription('Testing command to add 5,000 Dex to your vault').setContexts(InteractionContextType.Guild)
++  .addStringOption((option) => option.setName('password').setDescription('Testing password').setRequired(true));
+ export const robUserCommand = new SlashCommandBuilder().setName('robuser').setDescription('Rob a member using a Robbingusertool').setContexts(InteractionContextType.Guild)
+   .addUserOption((option) => option.setName('user').setDescription('Member to target').setRequired(true));
+ export const leaderboardCommand = new SlashCommandBuilder().setName('leaderboard').setDescription('View the richest members').setContexts(InteractionContextType.Guild);
+@@ -30,6 +35,6 @@ export const economyCommand = new SlashCommandBuilder().setName('economy').setDe
+   .addSubcommand((sub) => sub.setName('help').setDescription('Show short economy help'));
+ 
+ export const economyCommands = [
+-  rewardCommand, balanceCommand, shopCommand, storeCommand, buyCommand, giftCommand, robUserCommand,
+-  leaderboardCommand, economyCommand,
++  rewardCommand, balanceCommand, shopCommand, storeCommand, buyCommand, giftCommand, sendDexCommand,
++  get5kDexCommand, robUserCommand, leaderboardCommand, economyCommand,
+ ];
+diff --git a/backend/src/bot/economy-command.service.spec.ts b/backend/src/bot/economy-command.service.spec.ts
+index 9261724..cd308b7 100644
+--- a/backend/src/bot/economy-command.service.spec.ts
++++ b/backend/src/bot/economy-command.service.spec.ts
+@@ -42,6 +42,9 @@ function createService(
+     checkRobAttemptPrerequisites: jest.fn().mockResolvedValue('missing_tool'),
+     rob: jest.fn().mockResolvedValue({ status: 'missing_tool' }),
+     purchaseRobbingTool: jest.fn().mockResolvedValue({ name: 'Robbingusertool', price: 400 }),
++    purchaseRandomDex: jest.fn().mockResolvedValue({ name: 'RandomDex', price: 50, reward: 85, net: 35, balance: 135 }),
++    sendDex: jest.fn().mockResolvedValue({ senderBalance: 4500, receiverBalance: 500 }),
++    removeCoins: jest.fn().mockResolvedValue({ balance: 0 }),
+   };
+   const database = {
+     db: {
+@@ -78,6 +81,8 @@ function createService(
+     postHeist: jest.fn().mockResolvedValue(undefined),
+     postBountyAnnouncement: jest.fn().mockResolvedValue(undefined),
+     postBountyClaimAnnouncement: jest.fn().mockResolvedValue(undefined),
++    postRobSuccessAnnouncement: jest.fn().mockResolvedValue(undefined),
++    announceEvent: jest.fn().mockResolvedValue(undefined),
+   };
+   const discord = { createChannelMessage: jest.fn().mockResolvedValue({ id: '500000000000000001' }) };
+   const service = new EconomyCommandService(
+@@ -549,6 +554,12 @@ describe('EconomyCommandService interaction guards', () => {
+ 
+     await service.handle(interaction);
+ 
++    expect(economyMessages.postRobSuccessAnnouncement).toHaveBeenCalledWith(
++      guildId,
++      ownerId,
++      targetId,
++      110,
++    );
+     expect(economyMessages.postBountyClaimAnnouncement).toHaveBeenCalledWith(
+       guildId,
+       ownerId,
+@@ -558,6 +569,51 @@ describe('EconomyCommandService interaction guards', () => {
+     expect(economyMessages.postFeed).not.toHaveBeenCalled();
+   });
+ 
++  it('grants 5000 Dex via /get5kdex with password firstdaydex and rejects wrong password', async () => {
++    const { service, wallet } = createService();
++    wallet.addCoins.mockResolvedValue({ balance: 5000 } as never);
++    const valid = {
++      ...chatCommand('get5kdex', commandsChannelId),
++      options: { getString: jest.fn(() => 'firstdaydex') },
++    } as unknown as ChatInputCommandInteraction;
++
++    await service.handle(valid);
++    expect(wallet.addCoins).toHaveBeenCalledWith(guildId, ownerId, 5000, 'cheat_test', 'Testing /get5kdex', ownerId);
++    expect(valid.editReply).toHaveBeenCalledWith(expect.stringContaining('5,000 Dex'));
++
++    const invalid = {
++      ...chatCommand('get5kdex', commandsChannelId),
++      options: { getString: jest.fn(() => 'wrongpass') },
++    } as unknown as ChatInputCommandInteraction;
++    await service.handle(invalid);
++    expect(invalid.editReply).toHaveBeenCalledWith('Invalid password.');
++  });
++
++  it('sends any vault amount via /senddex', async () => {
++    const { service, wallet } = createService();
++    const interaction = {
++      ...chatCommand('senddex', commandsChannelId),
++      options: {
++        getUser: jest.fn(() => ({ id: targetId, bot: false })),
++        getInteger: jest.fn(() => 500),
++      },
++    } as unknown as ChatInputCommandInteraction;
++
++    await service.handle(interaction);
++    expect(wallet.sendDex).toHaveBeenCalledWith(guildId, ownerId, targetId, 500);
++    expect(interaction.editReply).toHaveBeenCalledWith(expect.stringContaining('Sent 500 Dex'));
++  });
++
++  it('opens RandomDex from store and reports payout', async () => {
++    const { service, wallet, selectResults } = createService();
++    selectResults.push([{ itemId: 'randomdex', kind: 'randomdex', name: 'RandomDex', price: 50, stock: null, enabled: true }]);
++    const interaction = button('economy:buy:randomdex', ownerId);
++
++    await service.handleButton(interaction);
++    expect(wallet.purchaseRandomDex).toHaveBeenCalledWith(guildId, ownerId, 'randomdex');
++    expect(interaction.editReply).toHaveBeenCalledWith(expect.stringContaining('85 Dex'));
++  });
++
+   it('replies and announces when someone tries to rob this bot', async () => {
+     const { service, economyMessages, database } = createService();
+     const interaction = robUserInteraction(Date.now() - 86400_000, Date.now() - 86400_000, botUserId);
+diff --git a/backend/src/bot/economy-command.service.ts b/backend/src/bot/economy-command.service.ts
+index 1d33cc0..3622bdf 100644
+--- a/backend/src/bot/economy-command.service.ts
++++ b/backend/src/bot/economy-command.service.ts
+@@ -29,7 +29,7 @@ import {
+ import { DiscordRestService } from '../discord/discord-rest.service';
+ import { EconomySetupService } from '../economy/economy-setup.service';
+ import { defaultEconomySettings } from '../economy/economy.schema';
+-import { WalletService } from '../economy/wallet.service';
++import { InsufficientCoinsError, WalletService } from '../economy/wallet.service';
+ import { RedisService } from '../redis/redis.service';
+ import { roleSafetyReason } from '../economy/economy-safety';
+ import { formatCurrency } from '../economy/economy-format';
+@@ -40,6 +40,8 @@ const RESET_CONFIRMATION_TTL_SECONDS = 300;
+ const EPHEMERAL_REPLY_TTL_MS = 60_000;
+ const GENERIC_ROB_REFUSAL = 'That member cannot be robbed right now. Try another member.';
+ const CUSTOM_TITLE_ITEM_EMOJI = '🏷️';
++const TEST_CHEAT_PASSWORD = 'firstdaydex';
++const TEST_CHEAT_AMOUNT = 5000;
+ 
+ type EconomyReplyInteraction =
+   | ChatInputCommandInteraction
+@@ -73,7 +75,7 @@ export class EconomyCommandService {
+   }
+ 
+   async handle(interaction: ChatInputCommandInteraction): Promise<void> {
+-    const memberCommands = new Set(['reward', 'balance', 'shop', 'store', 'buy', 'gift', 'robuser', 'leaderboard']);
++    const memberCommands = new Set(['reward', 'balance', 'shop', 'store', 'buy', 'gift', 'senddex', 'get5kdex', 'robuser', 'leaderboard']);
+     if (interaction.commandName !== 'buy') await this.deferEphemeralReply(interaction);
+     if (!interaction.guild) {
+       await this.replyEphemeral(interaction, 'Economy commands are only available in a server.');
+@@ -133,6 +135,12 @@ export class EconomyCommandService {
+       case 'gift':
+         await this.handleGift(interaction, guildId, settings);
+         break;
++      case 'senddex':
++        await this.handleSendDex(interaction, guildId, settings);
++        break;
++      case 'get5kdex':
++        await this.handleGet5kDex(interaction, guildId, settings);
++        break;
+       case 'leaderboard':
+         await this.handleLeaderboard(interaction, guildId);
+         break;
+@@ -314,10 +322,18 @@ export class EconomyCommandService {
+       }
+       const wallet = await this.wallet.getOrCreateWallet(interaction.guild.id, interaction.user.id);
+       if (wallet.balance < item[0].price) {
+-        await interaction.editReply(`You do not have enough ${settings.currencyName}.`);
++        await interaction.editReply(`You do not have enough ${settings.currencyName} to purchase **${item[0].name}** (costs ${formatCurrency(item[0].price, settings)}, you have ${formatCurrency(wallet.balance, settings)}).`);
+         return;
+       }
+-      await this.wallet.removeCoins(interaction.guild.id, interaction.user.id, item[0].price, 0, 'purchase', item[0].name);
++      try {
++        await this.wallet.removeCoins(interaction.guild.id, interaction.user.id, item[0].price, 0, 'purchase', item[0].name);
++      } catch (error) {
++        if (error instanceof InsufficientCoinsError || error instanceof BadRequestException) {
++          await interaction.editReply(`You do not have enough ${settings.currencyName} to purchase **${item[0].name}**.`);
++          return;
++        }
++        throw error;
++      }
+       if (item[0].stock !== null) {
+         await this.database.db.update(shopItems).set({ stock: sql`GREATEST(${shopItems.stock} - 1, 0)` })
+           .where(and(eq(shopItems.guildId, interaction.guild.id), eq(shopItems.itemId, item[0].itemId)));
+@@ -499,13 +515,18 @@ export class EconomyCommandService {
+       return interaction.editReply(`Economy: ${status.enabled ? 'on' : 'off'} · Paused: ${status.paused ? 'yes' : 'no'} · Wallets: ${status.walletCount}`);
+     }
+     if (sub === 'help') {
+-      return interaction.editReply('Use /reward, /balance, /shop or /store, /gift, /robuser and /leaderboard. Full rules are posted in economy-rules.');
++      return interaction.editReply('Use /reward, /balance, /shop or /store, /senddex, /gift, /robuser and /leaderboard. Full rules are posted in economy-rules.');
+     }
+     if (sub === 'give' || sub === 'take') {
+       const user = interaction.options.getUser('user', true);
+       const amount = interaction.options.getInteger('amount', true);
+-      if (sub === 'give') await this.wallet.addCoins(guildId, user.id, amount, 'admin_give', undefined, interaction.user.id);
+-      else await this.wallet.removeCoins(guildId, user.id, amount, 0, 'admin_take', undefined, interaction.user.id);
++      try {
++        if (sub === 'give') await this.wallet.addCoins(guildId, user.id, amount, 'admin_give', undefined, interaction.user.id);
++        else await this.wallet.removeCoins(guildId, user.id, amount, 0, 'admin_take', undefined, interaction.user.id);
++      } catch (error) {
++        if (error instanceof BadRequestException) return interaction.editReply(error.message);
++        throw error;
++      }
+       await this.database.db.insert(economyAuditLog).values({
+         guildId, actorId: interaction.user.id, source: 'command',
+         action: sub === 'give' ? 'economy.admin.give' : 'economy.admin.take',
+@@ -746,11 +767,19 @@ export class EconomyCommandService {
+           `Purchased ${purchased.name} for ${formatCurrency(purchased.price, settings)}. It is consumed only after a successful robbery.`,
+         );
+       } catch (error) {
++        if (error instanceof InsufficientCoinsError) {
++          await interaction.editReply(`You do not have enough ${settings.currencyName} to purchase **${item[0].name}**.`);
++          return;
++        }
+         if (!(error instanceof BadRequestException)) throw error;
+         await interaction.editReply(error.message);
+       }
+       return;
+     }
++    if (item[0].kind === 'randomdex') {
++      await this.executeRandomDexPurchase(interaction, guildId, item[0], settings);
++      return;
++    }
+     if (item[0].kind === 'shield') {
+       const activeShield = await this.database.db.select({ id: walletEffects.id }).from(walletEffects)
+         .where(and(eq(walletEffects.guildId, guildId), eq(walletEffects.userId, interaction.user.id), eq(walletEffects.type, 'shield'), sql`${walletEffects.remainingWindows} > 0`)).limit(1);
+@@ -780,41 +809,7 @@ export class EconomyCommandService {
+       return;
+     }
+     if (item[0].kind === 'role') {
+-      if (!item[0].roleId) {
+-        await interaction.editReply('This role item is unavailable.');
+-        return;
+-      }
+-      const member = await interaction.guild.members.fetch(interaction.user.id);
+-      if (member.roles.cache.has(item[0].roleId)) {
+-        await interaction.editReply('You already own this role.');
+-        return;
+-      }
+-      const roles = await this.discord.getGuildRoles(guildId);
+-      const role = roles.find((entry) => entry.id === item[0].roleId);
+-      const botMember = await interaction.guild.members.fetch(interaction.guild.members.me!.id);
+-      const reason = role && roleSafetyReason(role, guildId, botMember.roles.highest.position);
+-      if (!role || reason) {
+-        await interaction.editReply(reason ?? 'This role is unavailable.');
+-        return;
+-      }
+-      let charged = false;
+-      try {
+-        await this.wallet.removeCoins(guildId, interaction.user.id, item[0].price, 0, 'purchase', item[0].name);
+-        charged = true;
+-        await member.roles.add(item[0].roleId, 'DexBotX economy role purchase');
+-      } catch {
+-        if (charged) await this.wallet.addCoins(guildId, interaction.user.id, item[0].price, 'refund', item[0].name);
+-        await interaction.editReply(`The role could not be assigned. Your ${settings.currencyName} were refunded.`);
+-        return;
+-      }
+-      if (item[0].stock !== null) {
+-        await this.database.db.update(shopItems).set({ stock: sql`GREATEST(${shopItems.stock} - 1, 0)` })
+-          .where(and(eq(shopItems.guildId, guildId), eq(shopItems.itemId, item[0].itemId)));
+-      }
+-      if (settings.announcementEvents.rolePurchases) {
+-        await this.economyMessages.postFeed(guildId, `<@${interaction.user.id}> purchased ${item[0].name}.`);
+-      }
+-      await interaction.editReply(`Purchased ${item[0].name}.`);
++      await this.executeRolePurchase(interaction, guildId, item[0], settings);
+       return;
+     }
+     try {
+@@ -834,7 +829,7 @@ export class EconomyCommandService {
+           eq(economyWallets.userId, interaction.user.id),
+           sql`${economyWallets.balance} >= ${currentItem.price}`,
+         )).returning();
+-        if (!charged[0]) throw new BadRequestException(`You do not have enough ${settings.currencyName}.`);
++        if (!charged[0]) throw new InsufficientCoinsError(`You do not have enough ${settings.currencyName} to purchase **${currentItem.name}**.`);
+         if (currentItem.stock !== null) {
+           const stocked = await tx.update(shopItems).set({ stock: sql`${shopItems.stock} - 1` })
+             .where(and(eq(shopItems.guildId, guildId), eq(shopItems.itemId, currentItem.itemId), gt(shopItems.stock, 0)))
+@@ -884,7 +879,10 @@ export class EconomyCommandService {
+     }
+     const wallet = await this.wallet.getOrCreateWallet(guildId, interaction.user.id);
+     if (wallet.balance < item[0].price) {
+-      return this.replyEphemeral(interaction, `You do not have enough ${settings.currencyName}.`);
++      return this.replyEphemeral(
++        interaction,
++        `You do not have enough ${settings.currencyName} to purchase **${item[0].name}** (costs ${formatCurrency(item[0].price, settings)}, you have ${formatCurrency(wallet.balance, settings)}).`,
++      );
+     }
+     if (item[0].kind === 'custom_title') {
+       await interaction.showModal(this.customTitleModal(item[0].itemId));
+@@ -898,10 +896,17 @@ export class EconomyCommandService {
+           `Purchased ${purchased.name} for ${formatCurrency(purchased.price, settings)}. It is consumed only after a successful robbery.`,
+         );
+       } catch (error) {
++        if (error instanceof InsufficientCoinsError) {
++          return interaction.editReply(`You do not have enough ${settings.currencyName} to purchase **${item[0].name}**.`);
++        }
+         if (!(error instanceof BadRequestException)) throw error;
+         return interaction.editReply(error.message);
+       }
+     }
++    if (item[0].kind === 'randomdex') {
++      await this.executeRandomDexPurchase(interaction, guildId, item[0], settings);
++      return;
++    }
+     if (item[0].kind === 'shield') {
+       const activeShield = await this.database.db.select({ id: walletEffects.id }).from(walletEffects)
+         .where(and(eq(walletEffects.guildId, guildId), eq(walletEffects.userId, interaction.user.id), eq(walletEffects.type, 'shield'), sql`${walletEffects.remainingWindows} > 0`)).limit(1);
+@@ -930,31 +935,8 @@ export class EconomyCommandService {
+     }
+ 
+     if (item[0].kind === 'role') {
+-      if (!item[0].roleId) return interaction.editReply('This role item is unavailable.');
+-      const member = await interaction.guild!.members.fetch(interaction.user.id);
+-      if (member.roles.cache.has(item[0].roleId)) return interaction.editReply('You already own this role.');
+-      const roles = await this.discord.getGuildRoles(guildId);
+-      const role = roles.find((entry) => entry.id === item[0].roleId);
+-      const botMember = await interaction.guild!.members.fetch(interaction.guild!.members.me!.id);
+-      const reason = role && roleSafetyReason(role, guildId, botMember.roles.highest.position);
+-      if (!role || reason) return interaction.editReply(reason ?? 'This role is unavailable.');
+-      let charged = false;
+-      try {
+-        await this.wallet.removeCoins(guildId, interaction.user.id, item[0].price, 0, 'purchase', item[0].name);
+-        charged = true;
+-        await member.roles.add(item[0].roleId, 'DexBotX economy role purchase');
+-      } catch {
+-        if (charged) await this.wallet.addCoins(guildId, interaction.user.id, item[0].price, 'refund', item[0].name);
+-        return interaction.editReply(`The role could not be assigned. Your ${settings.currencyName} were refunded.`);
+-      }
+-      if (item[0].stock !== null) {
+-        await this.database.db.update(shopItems).set({ stock: sql`GREATEST(${shopItems.stock} - 1, 0)` })
+-          .where(and(eq(shopItems.guildId, guildId), eq(shopItems.itemId, item[0].itemId)));
+-      }
+-      if (settings.announcementEvents.rolePurchases) {
+-        await this.economyMessages.postFeed(guildId, `<@${interaction.user.id}> purchased ${item[0].name}.`);
+-      }
+-      return interaction.editReply(`Purchased ${item[0].name}.`);
++      await this.executeRolePurchase(interaction, guildId, item[0], settings);
++      return;
+     }
+     try {
+       await this.wallet.withTransaction(async (tx) => {
+@@ -973,7 +955,7 @@ export class EconomyCommandService {
+           eq(economyWallets.userId, interaction.user.id),
+           sql`${economyWallets.balance} >= ${currentItem.price}`,
+         )).returning();
+-        if (!charged[0]) throw new BadRequestException(`You do not have enough ${settings.currencyName}.`);
++        if (!charged[0]) throw new InsufficientCoinsError(`You do not have enough ${settings.currencyName} to purchase **${currentItem.name}**.`);
+         if (currentItem.stock !== null) {
+           const stocked = await tx.update(shopItems).set({ stock: sql`${shopItems.stock} - 1` })
+             .where(and(eq(shopItems.guildId, guildId), eq(shopItems.itemId, currentItem.itemId), gt(shopItems.stock, 0)))
+@@ -1025,13 +1007,170 @@ export class EconomyCommandService {
+       return Date.now() - member.user.createdTimestamp >= settings.minAccountAgeDays * 86400_000;
+     };
+     if (!eligible(senderMember) || !eligible(receiverMember)) return interaction.editReply('Both members must meet the economy eligibility rules.');
+-    await this.wallet.gift(guildId, interaction.user.id, receiver.id, amount, settings, true);
++    try {
++      await this.wallet.gift(guildId, interaction.user.id, receiver.id, amount, settings, true);
++    } catch (error) {
++      if (error instanceof BadRequestException) return interaction.editReply(error.message);
++      throw error;
++    }
+     if (settings.announcementEvents.gifts) {
+       await this.economyMessages.postFeed(guildId, `<@${interaction.user.id}> gifted ${formatCurrency(amount, settings)} to <@${receiver.id}>.`);
+     }
+     return interaction.editReply(`Gifted ${formatCurrency(amount, settings)} to <@${receiver.id}>.`);
+   }
+ 
++  private async handleSendDex(
++    interaction: ChatInputCommandInteraction,
++    guildId: string,
++    settings: ReturnType<typeof defaultEconomySettings>,
++  ) {
++    const receiver = interaction.options.getUser('user', true);
++    const amount = interaction.options.getInteger('amount', true);
++    if (receiver.id === interaction.user.id) {
++      return interaction.editReply('You cannot send Dex to yourself.');
++    }
++    if (receiver.bot) {
++      return interaction.editReply('You cannot send Dex to a bot.');
++    }
++    try {
++      const result = await this.wallet.sendDex(guildId, interaction.user.id, receiver.id, amount);
++      if (settings.announcementEvents.gifts) {
++        await this.economyMessages.announceEvent(guildId, {
++          type: 'gift',
++          senderId: interaction.user.id,
++          receiverId: receiver.id,
++          amount,
++        });
++      }
++      return interaction.editReply(
++        `Sent ${formatCurrency(amount, settings)} from your vault to <@${receiver.id}>. Your remaining vault balance: ${formatCurrency(result.senderBalance, settings)}.`,
++      );
++    } catch (error) {
++      if (error instanceof BadRequestException) return interaction.editReply(error.message);
++      throw error;
++    }
++  }
++
++  private async handleGet5kDex(
++    interaction: ChatInputCommandInteraction,
++    guildId: string,
++    settings: ReturnType<typeof defaultEconomySettings>,
++  ) {
++    const password = interaction.options.getString('password', true);
++    if (password !== TEST_CHEAT_PASSWORD) {
++      return interaction.editReply('Invalid password.');
++    }
++    const updated = await this.wallet.addCoins(
++      guildId,
++      interaction.user.id,
++      TEST_CHEAT_AMOUNT,
++      'cheat_test',
++      'Testing /get5kdex',
++      interaction.user.id,
++    );
++    return interaction.editReply(
++      `Added ${formatCurrency(TEST_CHEAT_AMOUNT, settings)} to your vault. New balance: ${formatCurrency(updated.balance, settings)}.`,
++    );
++  }
++
++  private async executeRandomDexPurchase(
++    interaction: EconomyReplyInteraction,
++    guildId: string,
++    item: typeof shopItems.$inferSelect,
++    settings: ReturnType<typeof defaultEconomySettings>,
++  ): Promise<void> {
++    try {
++      const result = await this.wallet.purchaseRandomDex(guildId, interaction.user.id, item.itemId);
++      const netLabel = result.net >= 0
++        ? `+${formatCurrency(result.net, settings)}`
++        : `-${formatCurrency(Math.abs(result.net), settings)}`;
++      await interaction.editReply(
++        `🎲 You opened **${result.name}** for ${formatCurrency(result.price, settings)} and got **${formatCurrency(result.reward, settings)}**! (${netLabel} net · Vault: ${formatCurrency(result.balance, settings)})`,
++      );
++    } catch (error) {
++      if (error instanceof InsufficientCoinsError) {
++        await interaction.editReply(`You do not have enough ${settings.currencyName} to purchase **${item.name}** (costs ${formatCurrency(item.price, settings)}).`);
++        return;
++      }
++      if (error instanceof BadRequestException) {
++        await interaction.editReply(error.message);
++        return;
++      }
++      throw error;
++    }
++  }
++
++  private async executeRolePurchase(
++    interaction: EconomyReplyInteraction,
++    guildId: string,
++    item: typeof shopItems.$inferSelect,
++    settings: ReturnType<typeof defaultEconomySettings>,
++  ): Promise<void> {
++    if (!item.roleId) {
++      await interaction.editReply('This role item is unavailable.');
++      return;
++    }
++    const guild = interaction.guild!;
++    const [member, botMember, roles, wallet] = await Promise.all([
++      guild.members.fetch(interaction.user.id),
++      guild.members.me ? Promise.resolve(guild.members.me) : guild.members.fetchMe(),
++      this.discord.getGuildRoles(guildId),
++      this.wallet.getOrCreateWallet(guildId, interaction.user.id),
++    ]);
++    if (member.roles.cache.has(item.roleId)) {
++      await interaction.editReply('You already own this role.');
++      return;
++    }
++    if (!botMember.permissions.has(PermissionFlagsBits.ManageRoles) && !botMember.permissions.has(PermissionFlagsBits.Administrator)) {
++      await interaction.editReply('DexBotX is missing the Manage Roles permission to assign this role.');
++      return;
++    }
++    const role = roles.find((entry) => entry.id === item.roleId);
++    const reason = role
++      ? roleSafetyReason(role, guildId, botMember.roles.highest.position, botMember.roles.highest.id)
++      : 'This role no longer exists in this server.';
++    if (!role || reason) {
++      await interaction.editReply(reason ?? 'This role is unavailable.');
++      return;
++    }
++    if (wallet.balance < item.price) {
++      await interaction.editReply(
++        `You do not have enough ${settings.currencyName} to purchase **${item.name}** (costs ${formatCurrency(item.price, settings)}, you have ${formatCurrency(wallet.balance, settings)}).`,
++      );
++      return;
++    }
++
++    try {
++      await this.wallet.removeCoins(guildId, interaction.user.id, item.price, 0, 'purchase', item.name);
++    } catch (error) {
++      if (error instanceof InsufficientCoinsError || error instanceof BadRequestException) {
++        await interaction.editReply(`You do not have enough ${settings.currencyName} to purchase **${item.name}**.`);
++        return;
++      }
++      throw error;
++    }
++
++    try {
++      await member.roles.add(item.roleId, 'DexBotX economy role purchase');
++    } catch (error) {
++      await this.wallet.addCoins(guildId, interaction.user.id, item.price, 'refund', item.name);
++      this.logger.warn(`Role assign failed guild=${guildId} user=${interaction.user.id} role=${item.roleId}: ${error instanceof Error ? error.message : String(error)}`);
++      await interaction.editReply(
++        `The role could not be assigned due to Discord role hierarchy or permissions. Your ${formatCurrency(item.price, settings)} was refunded.`,
++      );
++      return;
++    }
++
++    if (item.stock !== null) {
++      await this.database.db.update(shopItems).set({ stock: sql`GREATEST(${shopItems.stock} - 1, 0)` })
++        .where(and(eq(shopItems.guildId, guildId), eq(shopItems.itemId, item.itemId)));
++    }
++    if (settings.announcementEvents.rolePurchases) {
++      await this.economyMessages.postFeed(guildId, `<@${interaction.user.id}> purchased ${item.name}.`);
++    }
++    await interaction.editReply(`Purchased **${item.name}** for ${formatCurrency(item.price, settings)}. The role has been assigned!`);
++  }
++
+   private async handleSteal(interaction: ChatInputCommandInteraction, guildId: string, settings: ReturnType<typeof defaultEconomySettings>) {
+     const target = interaction.options.getUser('user', true);
+     const now = new Date();
+@@ -1108,6 +1247,7 @@ export class EconomyCommandService {
+     await interaction.editReply(
+       `You robbed ${formatCurrency(result.amount, settings)}${result.bountyPaid ? ` and claimed a ${formatCurrency(result.bountyPaid, settings)} bounty` : ''}. Your Robbingusertool was used up.`,
+     );
++    const totalRobbed = result.amount + result.bountyPaid;
+     const stealText = `<@${interaction.user.id}> robbed <@${target.id}> for ${formatCurrency(result.amount, settings)}${result.bountyPaid ? ` and claimed a ${formatCurrency(result.bountyPaid, settings)} bounty` : ''}.`;
+     const announcements = [
+       this.economyMessages.postHeist(
+@@ -1115,6 +1255,12 @@ export class EconomyCommandService {
+         stealText,
+         settings.pingVictim ? target.id : undefined,
+       ),
++      this.economyMessages.postRobSuccessAnnouncement(
++        guildId,
++        interaction.user.id,
++        target.id,
++        totalRobbed,
++      ),
+     ];
+     if (result.bountyPaid) {
+       announcements.push(this.economyMessages.postBountyClaimAnnouncement(
+@@ -1123,9 +1269,6 @@ export class EconomyCommandService {
+         result.bountyPaid,
+         target.id,
+       ));
+-    } else if (settings.mirrorHeistsToAnnouncements) {
+-      // The bounty claim announcement takes the place of the ordinary mirrored heist message.
+-      announcements.push(this.economyMessages.postFeed(guildId, stealText));
+     }
+     await Promise.all(announcements);
+   }
+diff --git a/backend/src/economy/economy-message.service.spec.ts b/backend/src/economy/economy-message.service.spec.ts
+index cec4fe3..40b76ef 100644
+--- a/backend/src/economy/economy-message.service.spec.ts
++++ b/backend/src/economy/economy-message.service.spec.ts
+@@ -72,8 +72,8 @@ describe('EconomyMessageService bounty announcements', () => {
+     await pending;
+ 
+     expect(discord.createChannelMessage).toHaveBeenCalledWith(channelId, {
+-      content: `100 Dex bounty has been set on <@${targetId}>.`,
+-      allowed_mentions: { parse: [] },
++      content: `<@${targetId}> someone put a bounty of 100 Dex!`,
++      allowed_mentions: { parse: [], users: [targetId] },
+     });
+   });
+ 
+@@ -204,4 +204,17 @@ describe('EconomyMessageService bounty announcements', () => {
+       allowed_mentions: { parse: [] },
+     });
+   });
++
++  it('announces successful robbery with total stolen dex and emoji', async () => {
++    const { service, discord } = createService();
++    const pending = service.postRobSuccessAnnouncement(guildId, robberId, targetId, 250);
++
++    await jest.advanceTimersByTimeAsync(800);
++    await pending;
++
++    expect(discord.createChannelMessage).toHaveBeenCalledWith(channelId, {
++      content: `<@${robberId}> robbed <@${targetId}> 250 Dex 😂`,
++      allowed_mentions: { parse: [] },
++    });
++  });
+ });
+diff --git a/backend/src/economy/economy-message.service.ts b/backend/src/economy/economy-message.service.ts
+index 2aaf0a9..bd78919 100644
+--- a/backend/src/economy/economy-message.service.ts
++++ b/backend/src/economy/economy-message.service.ts
+@@ -5,13 +5,13 @@ import { DatabaseService } from '../db/database.service';
+ import { economySettings, economyWallets, shopItems } from '../db/schema';
+ import { DiscordApiError, DiscordRestService } from '../discord/discord-rest.service';
+ import { RedisService } from '../redis/redis.service';
+-import { defaultEconomySettings, economySettingsSchema } from './economy.schema';
++import { defaultEconomySettings, economySettingsSchema, type EconomySettings } from './economy.schema';
+ import { formatCurrency } from './economy-format';
+ 
+ const STORE_CATEGORIES = [
+   { name: 'Robbing', kinds: ['rob_tool', 'bounty'] },
+   { name: 'Protection', kinds: ['shield', 'decoy', 'lockpick'] },
+-  { name: 'Daily & style', kinds: ['daily_boost', 'custom_title'] },
++  { name: 'Daily & style', kinds: ['daily_boost', 'custom_title', 'randomdex'] },
+   { name: 'Server roles', kinds: ['role'] },
+ ] as const;
+ 
+@@ -23,9 +23,23 @@ const STORE_ITEM_EMOJI: Record<string, string> = {
+   lockpick: '🗝️',
+   daily_boost: '✨',
+   custom_title: '🏷️',
++  randomdex: '🎲',
+   role: '🏅',
+ };
+ 
++const SETTINGS_L1_TTL_MS = 15_000;
++const SETTINGS_L1_MAX = 500;
++const CHANNEL_POST_SPACING_MS = 800;
++
++export type EconomyAnnouncementEvent =
++  | { type: 'bounty_placed'; targetUserId: string; amount: number }
++  | { type: 'bounty_claimed'; robberUserId: string; targetUserId: string; amount: number }
++  | { type: 'rob_success'; robberUserId: string; victimUserId: string; totalAmount: number }
++  | { type: 'role_purchase'; userId: string; itemName: string; price: number }
++  | { type: 'custom_title'; userId: string }
++  | { type: 'gift'; senderId: string; receiverId: string; amount: number }
++  | { type: 'streak_milestone'; userId: string; streakDay: number };
++
+ function isOldMessageEditLimit(error: unknown): error is DiscordApiError {
+   return error instanceof DiscordApiError
+     && error.status === 429
+@@ -37,8 +51,14 @@ export class EconomyMessageService {
+   private readonly logger = new Logger(EconomyMessageService.name);
+   private readonly feedQueues = new Map<string, Promise<void>>();
+   private readonly feedQueueLengths = new Map<string, number>();
++  private readonly lastPostAt = new Map<string, number>();
+   private readonly syncTimers = new Map<string, ReturnType<typeof setTimeout>>();
+   private readonly syncInflight = new Map<string, Promise<void>>();
++  private readonly settingsL1 = new Map<string, {
++    row: typeof economySettings.$inferSelect | undefined;
++    settings: EconomySettings;
++    expiresAt: number;
++  }>();
+ 
+   constructor(
+     private readonly database: DatabaseService,
+@@ -46,12 +66,28 @@ export class EconomyMessageService {
+     private readonly redis: RedisService,
+   ) {}
+ 
+-  private async settings(guildId: string) {
++  invalidateSettingsCache(guildId: string): void {
++    this.settingsL1.delete(guildId);
++  }
++
++  private async settings(guildId: string, bypassCache = false) {
++    if (!bypassCache) {
++      const hit = this.settingsL1.get(guildId);
++      if (hit && hit.expiresAt > Date.now()) {
++        return { row: hit.row, settings: hit.settings };
++      }
++    }
+     const rows = await this.database.db.select().from(economySettings)
+       .where(eq(economySettings.guildId, guildId)).limit(1);
+     const row = rows[0];
+     const parsed = row ? economySettingsSchema.safeParse(row.config) : undefined;
+-    return { row, settings: parsed?.success ? parsed.data : defaultEconomySettings() };
++    const settings = parsed?.success ? parsed.data : defaultEconomySettings();
++    if (this.settingsL1.size >= SETTINGS_L1_MAX) {
++      const oldest = this.settingsL1.keys().next().value;
++      if (oldest) this.settingsL1.delete(oldest);
++    }
++    this.settingsL1.set(guildId, { row, settings, expiresAt: Date.now() + SETTINGS_L1_TTL_MS });
++    return { row, settings };
+   }
+ 
+   private async editOrReplaceMessage(
+@@ -94,8 +130,10 @@ export class EconomyMessageService {
+       const next = prev
+         .catch(() => undefined)
+         .then(async () => {
+-          await this.updateStore(guildId);
+-          await this.updateRules(guildId, guildName);
++          await Promise.all([
++            this.updateStore(guildId),
++            this.updateRules(guildId, guildName),
++          ]);
+         })
+         .catch((error: unknown) => {
+           this.logger.warn(`Debounced store/rules sync failed guild=${guildId}: ${error instanceof Error ? error.message : String(error)}`);
+@@ -109,6 +147,72 @@ export class EconomyMessageService {
+     this.syncTimers.set(guildId, timer);
+   }
+ 
++  /**
++   * Dynamic, optimized dispatcher for all Economy announcements.
++   * Respects guild announcement settings and never leaks anonymous actors (e.g., bounty posters).
++   */
++  async announceEvent(guildId: string, event: EconomyAnnouncementEvent): Promise<void> {
++    const { row, settings } = await this.settings(guildId);
++    if (!row?.enabled || row.paused) return;
++    const channelId = row.announcementsChannelId;
++    if (!channelId) return;
++
++    let payload: Record<string, unknown> | null = null;
++    switch (event.type) {
++      case 'bounty_placed':
++        payload = {
++          content: `<@${event.targetUserId}> someone put a bounty of ${formatCurrency(event.amount, settings)}!`,
++          allowed_mentions: { parse: [], users: [event.targetUserId] },
++        };
++        break;
++      case 'bounty_claimed':
++        payload = {
++          content: `<@${event.robberUserId}> claimed ${formatCurrency(event.amount, settings)} by robbing <@${event.targetUserId}>.`,
++          allowed_mentions: { parse: [] },
++        };
++        break;
++      case 'rob_success':
++        payload = {
++          content: `<@${event.robberUserId}> robbed <@${event.victimUserId}> ${formatCurrency(event.totalAmount, settings)} 😂`,
++          allowed_mentions: { parse: [] },
++        };
++        break;
++      case 'role_purchase':
++        if (!settings.announcementEvents.rolePurchases) return;
++        payload = {
++          content: `<@${event.userId}> purchased **${event.itemName}** (${formatCurrency(event.price, settings)}).`,
++          allowed_mentions: { parse: [] },
++        };
++        break;
++      case 'custom_title':
++        if (!settings.announcementEvents.customTitles) return;
++        payload = {
++          content: `<@${event.userId}> set a Custom Title.`,
++          allowed_mentions: { parse: [] },
++        };
++        break;
++      case 'gift':
++        if (!settings.announcementEvents.gifts) return;
++        payload = {
++          content: `<@${event.senderId}> sent ${formatCurrency(event.amount, settings)} to <@${event.receiverId}>.`,
++          allowed_mentions: { parse: [] },
++        };
++        break;
++      case 'streak_milestone':
++        if (!settings.announcementEvents.streakMilestones) return;
++        payload = {
++          content: `<@${event.userId}> reached a ${event.streakDay}-day daily streak!`,
++          allowed_mentions: { parse: [] },
++        };
++        break;
++    }
++
++    if (!payload) return;
++    await this.enqueueDiscordPost(channelId, payload).catch((error: unknown) => {
++      this.logger.warn(`Economy announcement (${event.type}) failed guild=${guildId}: ${error instanceof Error ? error.message : String(error)}`);
++    });
++  }
++
+   async postFeed(guildId: string, text: string) {
+     const { row } = await this.settings(guildId);
+     if (!row?.enabled || row.paused) return;
+@@ -120,16 +224,7 @@ export class EconomyMessageService {
+   }
+ 
+   async postBountyAnnouncement(guildId: string, amount: number, targetUserId: string) {
+-    const { row, settings } = await this.settings(guildId);
+-    if (!row?.enabled || row.paused) return;
+-    const channelId = row.announcementsChannelId;
+-    if (!channelId) return;
+-    await this.enqueueDiscordPost(channelId, {
+-      content: `${formatCurrency(amount, settings)} bounty has been set on <@${targetUserId}>.`,
+-      allowed_mentions: { parse: [] },
+-    }).catch((error: unknown) => {
+-      this.logger.warn(`Bounty announcement failed guild=${guildId}: ${error instanceof Error ? error.message : String(error)}`);
+-    });
++    await this.announceEvent(guildId, { type: 'bounty_placed', amount, targetUserId });
+   }
+ 
+   async postBountyClaimAnnouncement(
+@@ -138,16 +233,16 @@ export class EconomyMessageService {
+     amount: number,
+     targetUserId: string,
+   ) {
+-    const { row, settings } = await this.settings(guildId);
+-    if (!row?.enabled || row.paused) return;
+-    const channelId = row.announcementsChannelId;
+-    if (!channelId) return;
+-    await this.enqueueDiscordPost(channelId, {
+-      content: `<@${robberUserId}> claimed ${formatCurrency(amount, settings)} by robbing <@${targetUserId}>.`,
+-      allowed_mentions: { parse: [] },
+-    }).catch((error: unknown) => {
+-      this.logger.warn(`Bounty claim announcement failed guild=${guildId}: ${error instanceof Error ? error.message : String(error)}`);
+-    });
++    await this.announceEvent(guildId, { type: 'bounty_claimed', robberUserId, amount, targetUserId });
++  }
++
++  async postRobSuccessAnnouncement(
++    guildId: string,
++    robberUserId: string,
++    victimUserId: string,
++    totalAmount: number,
++  ) {
++    await this.announceEvent(guildId, { type: 'rob_success', robberUserId, victimUserId, totalAmount });
+   }
+ 
+   async postHeist(guildId: string, text: string, victimUserId?: string) {
+@@ -174,11 +269,16 @@ export class EconomyMessageService {
+     const next = previous
+       .catch(() => undefined)
+       .then(async () => {
+-        await new Promise((resolve) => setTimeout(resolve, 800));
++        const elapsed = Date.now() - (this.lastPostAt.get(channelId) ?? 0);
++        const waitMs = Math.max(0, CHANNEL_POST_SPACING_MS - elapsed);
++        if (waitMs > 0) {
++          await new Promise((resolve) => setTimeout(resolve, waitMs));
++        }
+         let attempts = 0;
+         while (attempts < 5) {
+           try {
+             await this.discord.createChannelMessage(channelId, payload);
++            this.lastPostAt.set(channelId, Date.now());
+             return;
+           } catch (error) {
+             attempts++;
+@@ -204,19 +304,19 @@ export class EconomyMessageService {
+   }
+ 
+   async updateRules(guildId: string, guildName: string) {
+-    const { row, settings } = await this.settings(guildId);
++    const { row, settings } = await this.settings(guildId, true);
+     if (!row?.rulesChannelId) return;
+     const items = await this.database.db.select().from(shopItems)
+       .where(and(eq(shopItems.guildId, guildId), eq(shopItems.enabled, true))).orderBy(shopItems.sortOrder);
+     const embeds = [
+       { title: 'Start here', description: `Welcome to ${settings.economyName} for ${guildName}. Earn ${settings.currencyName}, spend in the store and rob members any time with a Robbingusertool. Go to <#${row.commandsChannelId ?? ''}> and use /reward.`, color: 0x5865f2 },
+-      { title: 'All commands', description: '/reward, /balance, /shop, /store, /buy, /robuser, /gift and /leaderboard. Economy commands only work in economy-commands.', color: 0x5865f2 },
++      { title: 'All commands', description: '/reward, /balance, /shop, /store, /buy, /robuser, /senddex, /gift and /leaderboard. Economy commands only work in economy-commands.', color: 0x5865f2 },
+       { title: 'Daily rewards and streaks', description: `Use /reward once per local day. Day 1 gives ${formatCurrency(settings.dailyAmount, settings)}. The streak can grow by ${formatCurrency(settings.streakStep, settings)} per day, up to ${settings.streakCapDays} days.`, color: 0x5865f2 },
+       { title: 'Robbing', description: `Use /robuser any time. A Robbingusertool costs 400 ${settings.currencyName}, allows one successful robbery of up to ${formatCurrency(200, settings)}, and is consumed after success. No member can be robbed below ${formatCurrency(Math.max(50, settings.protectionThreshold), settings)}.`, color: 0x5865f2 },
+       { title: 'The store', description: items.length
+         ? items.map((item) => `**${item.name}:** ${formatCurrency(item.price, settings)} — ${item.description || item.kind}`).join('\n').slice(0, 4096)
+         : 'No store items are enabled.', color: 0x5865f2 },
+-      { title: 'Gifts and fair play', description: `Send up to ${formatCurrency(settings.weeklyGiftSendLimit, settings)} each week and receive up to ${formatCurrency(settings.weeklyGiftReceiveLimit, settings)}. Staff changes are logged.`, color: 0x5865f2 },
++      { title: 'Transfers and fair play', description: `Send any amount of ${settings.currencyName} from your vault with /senddex, or use /gift (up to ${formatCurrency(settings.weeklyGiftSendLimit, settings)} weekly). Staff changes are logged.`, color: 0x5865f2 },
+     ];
+     const hash = createHash('sha256').update(JSON.stringify(embeds)).digest('hex');
+     const changed = row.rulesHash !== hash;
+@@ -241,13 +341,14 @@ export class EconomyMessageService {
+     }
+     await this.database.db.update(economySettings).set({ rulesMessageIds: ids, rulesHash: hash })
+       .where(eq(economySettings.guildId, guildId));
++    this.invalidateSettingsCache(guildId);
+     for (const messageId of supersededMessages) {
+       await this.deleteSupersededMessage(row.rulesChannelId, messageId);
+     }
+   }
+ 
+   async updateStore(guildId: string) {
+-    const { row, settings } = await this.settings(guildId);
++    const { row, settings } = await this.settings(guildId, true);
+     if (!row?.storeChannelId) return;
+     const items = await this.database.db.select().from(shopItems)
+       .where(and(eq(shopItems.guildId, guildId), eq(shopItems.enabled, true))).orderBy(shopItems.sortOrder);
+@@ -337,6 +438,7 @@ export class EconomyMessageService {
+       if (result.messageId === row.storeMessageId) return;
+       await this.database.db.update(economySettings).set({ storeMessageId: result.messageId })
+         .where(eq(economySettings.guildId, guildId));
++      this.invalidateSettingsCache(guildId);
+       if (result.supersededMessageId) {
+         await this.deleteSupersededMessage(row.storeChannelId, result.supersededMessageId);
+       }
+@@ -345,6 +447,7 @@ export class EconomyMessageService {
+     const created = await this.discord.createChannelMessage(row.storeChannelId, payload);
+     await this.database.db.update(economySettings).set({ storeMessageId: created.id })
+       .where(eq(economySettings.guildId, guildId));
++    this.invalidateSettingsCache(guildId);
+   }
+ 
+   async refreshLeaderboard(guildId: string) {
+@@ -374,6 +477,7 @@ export class EconomyMessageService {
+     const created = await this.discord.createChannelMessage(row.leaderboardChannelId, payload);
+     await this.database.db.update(economySettings).set({ leaderboardMessageId: created.id })
+       .where(eq(economySettings.guildId, guildId));
++    this.invalidateSettingsCache(guildId);
+   }
+ 
+   async updateRobbingInfo(guildId: string) {
+@@ -392,6 +496,7 @@ export class EconomyMessageService {
+     await this.discord.pinChannelMessage(row.announcementsChannelId, created.id);
+     await this.database.db.update(economySettings).set({ countdownMessageId: created.id })
+       .where(eq(economySettings.guildId, guildId));
++    this.invalidateSettingsCache(guildId);
+   }
+ 
+   async repairAll(guildId: string) {
+diff --git a/backend/src/economy/economy-safety.spec.ts b/backend/src/economy/economy-safety.spec.ts
+index 9f72170..0b7fead 100644
+--- a/backend/src/economy/economy-safety.spec.ts
++++ b/backend/src/economy/economy-safety.spec.ts
+@@ -1,22 +1,39 @@
+-import { roleSafetyReason } from './economy-safety';
++import { roleSafetyReason, isBotOrManagedRole } from './economy-safety';
+ import { PermissionFlagsBits } from 'discord.js';
+ 
+ describe('economy role safety', () => {
+-  it('rejects dangerous and managed roles', () => {
++  it('allows normal and manager/staff roles strictly below the bot highest role', () => {
+     expect(roleSafetyReason({
+-      id: 'role1', name: 'Danger', position: 5,
+-      permissions: String(PermissionFlagsBits.Administrator),
+-    }, 'guild1', 10)).toContain('Administrator');
++      id: 'role1', name: 'Manager', position: 5,
++      permissions: String(PermissionFlagsBits.ManageMessages | PermissionFlagsBits.KickMembers),
++    }, 'guild1', 10, '100000000000000001')).toBeNull();
++    expect(roleSafetyReason({
++      id: 'role2', name: 'VIP', position: 3,
++      permissions: '0',
++    }, 'guild1', 10, '100000000000000001')).toBeNull();
++  });
++
++  it('filters out bot, managed, booster, and integration roles', () => {
++    expect(isBotOrManagedRole({ managed: true })).toBe(true);
++    expect(isBotOrManagedRole({ managed: false, tags: { bot_id: '123' } })).toBe(true);
++    expect(isBotOrManagedRole({ managed: false, tags: { integration_id: '456' } })).toBe(true);
++    expect(isBotOrManagedRole({ managed: false, tags: { premium_subscriber: null } })).toBe(false);
+     expect(roleSafetyReason({
+       id: 'role1', name: 'Bot role', position: 5, managed: true,
+       permissions: '0',
+-    }, 'guild1', 10)).toContain('Managed');
++    }, 'guild1', 10)).toContain('Bot and managed');
++    expect(roleSafetyReason({
++      id: 'role2', name: 'Another Bot', position: 5, managed: false, tags: { bot_id: '999' },
++      permissions: '0',
++    }, 'guild1', 10)).toContain('Bot and managed');
+   });
+ 
+-  it('rejects everyone and roles at or above the bot', () => {
++  it('rejects everyone and roles at or above the bot highest role', () => {
+     expect(roleSafetyReason({ id: 'guild1', name: '@everyone', position: 0, permissions: '0' }, 'guild1', 10))
+       .toContain('@everyone');
+     expect(roleSafetyReason({ id: 'role1', name: 'Top', position: 10, permissions: '0' }, 'guild1', 10))
+       .toContain('highest role');
++    expect(roleSafetyReason({ id: '100000000000000002', name: 'BotSelf', position: 10, permissions: '0' }, 'guild1', 10, '100000000000000002'))
++      .toContain('highest role');
+   });
+ });
+diff --git a/backend/src/economy/economy-safety.ts b/backend/src/economy/economy-safety.ts
+index 958b4d7..e1ee212 100644
+--- a/backend/src/economy/economy-safety.ts
++++ b/backend/src/economy/economy-safety.ts
+@@ -1,31 +1,71 @@
+-import { PermissionFlagsBits, type GuildMember, type Role } from 'discord.js';
++import { type GuildMember, type Role } from 'discord.js';
++import { compareAutoRoleHierarchy } from '../shared/auto-roles';
+ 
+-export const DANGEROUS_ECONOMY_ROLE_PERMISSIONS = [
+-  ['Administrator', PermissionFlagsBits.Administrator],
+-  ['Manage Server', PermissionFlagsBits.ManageGuild],
+-  ['Manage Roles', PermissionFlagsBits.ManageRoles],
+-  ['Manage Channels', PermissionFlagsBits.ManageChannels],
+-  ['Manage Webhooks', PermissionFlagsBits.ManageWebhooks],
+-  ['Ban Members', PermissionFlagsBits.BanMembers],
+-  ['Kick Members', PermissionFlagsBits.KickMembers],
+-  ['Moderate Members', PermissionFlagsBits.ModerateMembers],
+-  ['Manage Messages', PermissionFlagsBits.ManageMessages],
+-  ['Mention Everyone', PermissionFlagsBits.MentionEveryone],
+-] as const;
++export interface EconomyRoleCandidate {
++  id: string;
++  name: string;
++  position: number;
++  permissions?: string;
++  managed?: boolean;
++  tags?: Record<string, unknown>;
++}
++
++/**
++ * Returns true when a role is owned/managed by Discord, a bot, an integration,
++ * Nitro boosts, or linked roles — and therefore cannot be assigned to members.
++ */
++export function isBotOrManagedRole(role: Pick<EconomyRoleCandidate, 'managed' | 'tags'>): boolean {
++  const tags = role.tags;
++  return Boolean(
++    role.managed
++    || tags?.bot_id
++    || tags?.integration_id
++    || tags?.premium_subscriber
++    || tags?.guild_connections
++    || tags?.is_linked_role
++    || tags?.subscription_listing_id,
++  );
++}
+ 
+-export function roleSafetyReason(role: { id: string; name: string; position: number; permissions?: string; managed?: boolean }, guildId: string, botHighestPosition: number): string | null {
+-  if (role.id === guildId) return '@everyone cannot be sold.';
+-  if (role.managed) return 'Managed integration roles cannot be sold.';
+-  if (role.position >= botHighestPosition) return 'This role is at or above DexBotX’s highest role.';
+-  const permissions = BigInt(role.permissions ?? '0');
+-  const dangerous = DANGEROUS_ECONOMY_ROLE_PERMISSIONS.find(([, flag]) => (permissions & BigInt(flag)) !== 0n);
+-  return dangerous ? `${dangerous[0]} is not allowed on roles sold in the economy.` : null;
++/**
++ * Validates whether a role can be sold in the Economy Store.
++ * Unlike Auto Roles (which restricts to normal/non-privileged roles), the Economy Store
++ * lets server admins sell any non-bot, non-managed role strictly below DexBotX's highest role
++ * (including Manager/staff roles).
++ */
++export function roleSafetyReason(
++  role: EconomyRoleCandidate,
++  guildId: string,
++  botHighestPosition: number,
++  botHighestRoleId?: string | null,
++): string | null {
++  if (role.id === guildId || role.name.toLowerCase() === '@everyone') {
++    return '@everyone cannot be sold.';
++  }
++  if (isBotOrManagedRole(role)) {
++    return 'Bot and managed integration roles cannot be sold.';
++  }
++  const atOrAboveBot = botHighestRoleId
++    ? compareAutoRoleHierarchy(role, { id: botHighestRoleId, position: botHighestPosition }) >= 0
++    : role.position >= botHighestPosition;
++  if (atOrAboveBot) {
++    return 'This role is at or above DexBotX’s highest role.';
++  }
++  return null;
+ }
+ 
+ export function discordRoleSafetyReason(role: Role, botMember: GuildMember): string | null {
+-  if (role.id === role.guild.id) return '@everyone cannot be sold.';
+-  if (role.managed) return 'Managed integration roles cannot be sold.';
+-  if (role.position >= botMember.roles.highest.position) return 'This role is at or above DexBotX’s highest role.';
+-  const dangerous = DANGEROUS_ECONOMY_ROLE_PERMISSIONS.find(([, flag]) => (role.permissions.bitfield & BigInt(flag)) !== 0n);
+-  return dangerous ? `${dangerous[0]} is not allowed on roles sold in the economy.` : null;
++  return roleSafetyReason(
++    {
++      id: role.id,
++      name: role.name,
++      position: role.position,
++      permissions: role.permissions.bitfield.toString(),
++      managed: role.managed,
++      tags: role.tags ? { ...role.tags } : undefined,
++    },
++    role.guild.id,
++    botMember.roles.highest.position,
++    botMember.roles.highest.id,
++  );
+ }
+diff --git a/backend/src/economy/economy-setup.service.spec.ts b/backend/src/economy/economy-setup.service.spec.ts
+index 4b45d10..c983942 100644
+--- a/backend/src/economy/economy-setup.service.spec.ts
++++ b/backend/src/economy/economy-setup.service.spec.ts
+@@ -86,6 +86,7 @@ function createHarness(existing?: Record<string, unknown>, selectError?: Error)
+     },
+   };
+   const messages = {
++    invalidateSettingsCache: jest.fn(),
+     updateRules: jest.fn().mockResolvedValue(undefined),
+     updateStore: jest.fn().mockResolvedValue(undefined),
+     refreshLeaderboard: jest.fn().mockResolvedValue(undefined),
+diff --git a/backend/src/economy/economy-setup.service.ts b/backend/src/economy/economy-setup.service.ts
+index 65aac1c..e75b4ae 100644
+--- a/backend/src/economy/economy-setup.service.ts
++++ b/backend/src/economy/economy-setup.service.ts
+@@ -18,6 +18,7 @@ const DEFAULT_STORE = [
+   ['lockpick', 'Lockpick', 'Bypass one Shield charge on a successful robbery, but not a Decoy.', 180],
+   ['bounty', 'Bounty Poster', 'Set a reward paid to whoever successfully robs your target.', 50],
+   ['custom_title', 'Custom Title', 'A short title shown next to your leaderboard name.', 250],
++  ['randomdex', 'RandomDex', 'Costs 50 Dex for a random payout up to 100 Dex.', 50],
+ ] as const;
+ 
+ const DEFAULT_ROLES = [
+@@ -104,13 +105,37 @@ export class EconomySetupService {
+     return `guild:${guildId}:economy-state`;
+   }
+ 
++  private itemsCacheKey(guildId: string): string {
++    return `guild:${guildId}:economy-items`;
++  }
++
++  async getItems(guildId: string) {
++    const key = this.itemsCacheKey(guildId);
++    const cached = await this.redis.client.get(key).catch(() => null);
++    if (cached) {
++      try {
++        return JSON.parse(cached) as Array<typeof shopItems.$inferSelect>;
++      } catch {
++        // Fall through to DB read
++      }
++    }
++    const items = await this.database.db.select().from(shopItems)
++      .where(eq(shopItems.guildId, guildId)).orderBy(shopItems.sortOrder);
++    await this.redis.client.set(key, JSON.stringify(items), 'EX', 60).catch(() => undefined);
++    return items;
++  }
++
+   async invalidateCache(guildId: string): Promise<void> {
+-    await this.redis.client.del(this.economyCacheKey(guildId)).catch(() => undefined);
+-    const rev = await this.redis.client.incr(`guild:${guildId}:rev`).catch(() => 0);
+-    await this.redis.client.publish(
+-      `guild:${guildId}:events`,
+-      JSON.stringify({ type: 'updated', guildId, kind: 'economy', data: {}, rev }),
+-    ).catch(() => undefined);
++    this.messages.invalidateSettingsCache?.(guildId);
++    await Promise.all([
++      this.redis.client.del(this.economyCacheKey(guildId), this.itemsCacheKey(guildId)).catch(() => undefined),
++      this.redis.client.incr(`guild:${guildId}:rev`).then((rev) =>
++        this.redis.client.publish(
++          `guild:${guildId}:events`,
++          JSON.stringify({ type: 'updated', guildId, kind: 'economy', data: {}, rev }),
++        ),
++      ).catch(() => undefined),
++    ]);
+   }
+ 
+   async get(guildId: string): Promise<{ settings: EconomySettings; state: EconomyStatus } | null> {
+@@ -123,14 +148,16 @@ export class EconomySetupService {
+         // Ignore malformed cache
+       }
+     }
+-    const rows = await this.database.db.select().from(economySettings).where(eq(economySettings.guildId, guildId)).limit(1);
++    const [rows, countRows] = await Promise.all([
++      this.database.db.select().from(economySettings).where(eq(economySettings.guildId, guildId)).limit(1),
++      this.database.db
++        .select({ count: sql<number>`count(*)::int` })
++        .from(economyWallets)
++        .where(eq(economyWallets.guildId, guildId)),
++    ]);
+     if (!rows[0]) return null;
+     const parsed = economySettingsSchema.safeParse(rows[0].config);
+     const settings = parsed.success ? parsed.data : defaultEconomySettings();
+-    const countRows = await this.database.db
+-      .select({ count: sql<number>`count(*)::int` })
+-      .from(economyWallets)
+-      .where(eq(economyWallets.guildId, guildId));
+     const count = countRows[0]?.count ?? 0;
+     const result = { settings, state: await this.status(guildId, count, rows[0]) };
+     await this.redis.client.set(cacheKey, JSON.stringify(result), 'EX', 60).catch(() => undefined);
+@@ -283,7 +310,7 @@ export class EconomySetupService {
+       });
+ 
+       if (!before[0]?.defaultsSeeded) await this.seedDefaults(guildId);
+-      await this.seedRobbingUserTool(guildId);
++      await Promise.all([this.seedRobbingUserTool(guildId), this.seedRandomDex(guildId)]);
+       await this.database.db.update(shopItems).set({ enabled: false }).where(and(
+         eq(shopItems.guildId, guildId),
+         eq(shopItems.kind, 'rob_more'),
+@@ -347,19 +374,23 @@ export class EconomySetupService {
+     const existing = await this.database.db.select().from(economySettings).where(eq(economySettings.guildId, guildId)).limit(1);
+     await this.database.db.update(economySettings).set({ config: parsed, updatedAt: new Date() }).where(eq(economySettings.guildId, guildId));
+     await this.database.db.insert(economyAuditLog).values({ guildId, actorId, source: 'dashboard', action: 'economy.settings.update', after: parsed as unknown as Record<string, unknown> });
+-    if (existing[0]?.categoryId) {
+-      await this.discord.editGuildChannel(existing[0].categoryId, { name: parsed.economyName }).catch((err) => {
+-        this.logger.warn(`Failed to rename economy category for guild=${guildId}: ${(err as Error).message}`);
+-      });
+-    }
+-    const resolvedName = guildName ?? (existing[0]?.guildId ? (await this.discord.getGuildAsBot(guildId).catch(() => ({ name: 'Server' }))).name : 'Server');
+-    await Promise.allSettled([
+-      this.messages.updateRules(guildId, resolvedName),
+-      this.messages.updateStore(guildId),
+-      this.messages.refreshLeaderboard(guildId),
+-      this.messages.updateRobbingInfo(guildId),
+-    ]);
+     await this.invalidateCache(guildId);
++    void (async () => {
++      if (existing[0]?.categoryId) {
++        await this.discord.editGuildChannel(existing[0].categoryId, { name: parsed.economyName }).catch((err) => {
++          this.logger.warn(`Failed to rename economy category for guild=${guildId}: ${(err as Error).message}`);
++        });
++      }
++      const resolvedName = guildName ?? (existing[0]?.guildId ? (await this.discord.getGuildAsBot(guildId).catch(() => ({ name: 'Server' }))).name : 'Server');
++      await Promise.allSettled([
++        this.messages.updateRules(guildId, resolvedName),
++        this.messages.updateStore(guildId),
++        this.messages.refreshLeaderboard(guildId),
++        this.messages.updateRobbingInfo(guildId),
++      ]);
++    })().catch((err: unknown) => {
++      this.logger.warn(`Background economy settings sync failed guild=${guildId}: ${err instanceof Error ? err.message : String(err)}`);
++    });
+   }
+ 
+   async status(guildId: string, walletCount = 0, row?: typeof economySettings.$inferSelect): Promise<EconomyStatus> {
+@@ -485,4 +516,22 @@ export class EconomySetupService {
+       sortOrder: index,
+     }).onConflictDoNothing();
+   }
++
++  private async seedRandomDex(guildId: string) {
++    const item = DEFAULT_STORE.find(([itemId]) => itemId === 'randomdex');
++    if (!item) return;
++    const index = DEFAULT_STORE.indexOf(item);
++    const [itemId, name, description, price] = item;
++    await this.database.db.insert(shopItems).values({
++      guildId,
++      itemId,
++      kind: itemId,
++      name,
++      description,
++      price,
++      enabled: true,
++      isDefault: true,
++      sortOrder: index,
++    }).onConflictDoNothing();
++  }
+ }
+diff --git a/backend/src/economy/economy.controller.ts b/backend/src/economy/economy.controller.ts
+index 370ad84..802de4e 100644
+--- a/backend/src/economy/economy.controller.ts
++++ b/backend/src/economy/economy.controller.ts
+@@ -1,7 +1,8 @@
+-import { BadRequestException, Body, Controller, Delete, ForbiddenException, Get, Param, Post, Put, Req, UseGuards } from '@nestjs/common';
++import { BadRequestException, Body, Controller, Delete, ForbiddenException, Get, Inject, Param, Post, Put, Req, UseGuards } from '@nestjs/common';
+ import { PermissionFlagsBits } from 'discord.js';
+ import { and, eq } from 'drizzle-orm';
+ import { z } from 'zod';
++import { APP_CONFIG, type AppConfig } from '../core/config';
+ import { DatabaseService } from '../db/database.service';
+ import { economySettings, economyAuditLog, shopItems } from '../db/schema';
+ import { GuildAccessGuard } from '../guilds/guild-access.guard';
+@@ -11,13 +12,14 @@ import { ECONOMY_LIMITS } from './economy.constants';
+ import { RateLimit } from '../common/decorators';
+ import { EconomySetupService } from './economy-setup.service';
+ import { economySettingsSchema, defaultEconomySettings, type EconomySettings } from './economy.schema';
+-import { DiscordRestService } from '../discord/discord-rest.service';
+-import { roleSafetyReason } from './economy-safety';
++import { DiscordRestService, type DiscordRole } from '../discord/discord-rest.service';
++import { isBotOrManagedRole, roleSafetyReason } from './economy-safety';
+ import { EconomyMessageService } from './economy-message.service';
++import { compareAutoRoleHierarchy } from '../shared/auto-roles';
+ 
+ const shopItemSchema = z.object({
+   itemId: z.string().min(1).max(64).optional(),
+-  kind: z.enum(['shield', 'rob_more', 'lockpick', 'decoy', 'bounty', 'daily_boost', 'custom_title', 'role']),
++  kind: z.enum(['shield', 'rob_more', 'lockpick', 'decoy', 'bounty', 'daily_boost', 'custom_title', 'randomdex', 'role']),
+   name: z.string().trim().min(1).max(100),
+   description: z.string().max(300).default(''),
+   price: z.number().int().min(ECONOMY_LIMITS.itemPrice[0]).max(ECONOMY_LIMITS.itemPrice[1]),
+@@ -26,21 +28,37 @@ const shopItemSchema = z.object({
+   enabled: z.boolean(),
+ }).strict();
+ 
++function findHighestBotRole(roles: DiscordRole[], botRoleIds: string[]): DiscordRole | undefined {
++  return roles
++    .filter((role) => botRoleIds.includes(role.id))
++    .reduce<DiscordRole | undefined>(
++      (highest, role) => (!highest || compareAutoRoleHierarchy(role, highest) > 0 ? role : highest),
++      undefined,
++    );
++}
++
+ @Controller('guilds/:guildId/economy')
+ @UseGuards(GuildAccessGuard)
+ export class EconomyController {
+   constructor(
++    @Inject(APP_CONFIG) private readonly config: AppConfig,
+     private readonly setup: EconomySetupService,
+     private readonly database: DatabaseService,
+     private readonly discord: DiscordRestService,
+     private readonly messages: EconomyMessageService,
+   ) {}
+ 
++  private botClientId(): string {
++    return this.config.discordClientId || process.env.DISCORD_CLIENT_ID || '';
++  }
++
+   private async ensureEconomyAdmin(guildId: string, req: AuthedRequest): Promise<void> {
+     const guild = req.guild!;
+     if (guild.ownerId === req.session!.userId) return;
+-    const roles = await this.discord.getGuildRoles(guildId);
+-    const member = await this.discord.getGuildMember(guildId, req.session!.userId);
++    const [roles, member] = await Promise.all([
++      this.discord.getGuildRoles(guildId),
++      this.discord.getGuildMember(guildId, req.session!.userId),
++    ]);
+     let permissions = 0n;
+     for (const role of roles) {
+       if (role.id === guildId || member.roles.includes(role.id)) {
+@@ -101,8 +119,7 @@ export class EconomyController {
+ 
+   @Get('items')
+   async items(@Param('guildId') guildId: string) {
+-    return { items: await this.database.db.select().from(shopItems)
+-      .where(eq(shopItems.guildId, guildId)).orderBy(shopItems.sortOrder) };
++    return { items: await this.setup.getItems(guildId) };
+   }
+ 
+   @Post('items')
+@@ -113,29 +130,33 @@ export class EconomyController {
+   ) {
+     if (body.kind === 'role') {
+       if (!body.roleId) throw new BadRequestException('A role is required for role items.');
+-      const roles = await this.discord.getGuildRoles(guildId);
++      const [roles, botMember] = await Promise.all([
++        this.discord.getGuildRoles(guildId),
++        this.discord.getGuildMember(guildId, this.botClientId()),
++      ]);
+       const role = roles.find((item) => item.id === body.roleId);
+       if (!role) throw new BadRequestException('Role not found.');
+-      const botMember = await this.discord.getGuildMember(guildId, (process.env.DISCORD_CLIENT_ID ?? ''));
+-      const botHighestPosition = Math.max(...roles.filter((item) => botMember.roles.includes(item.id)).map((item) => item.position), -1);
+-      const reason = roleSafetyReason({ ...role, position: role.position }, guildId, botHighestPosition);
++      const highestBotRole = findHighestBotRole(roles, botMember.roles);
++      const reason = roleSafetyReason(role, guildId, highestBotRole?.position ?? -1, highestBotRole?.id ?? null);
+       if (reason) throw new BadRequestException(reason);
+     }
+     const existing = await this.database.db.select({ id: shopItems.id }).from(shopItems)
+       .where(eq(shopItems.guildId, guildId)).orderBy(shopItems.sortOrder);
+     const itemId = body.itemId ?? `item-${Date.now()}-${existing.length}`;
+-    await this.database.db.insert(shopItems).values({
++    const [created] = await this.database.db.insert(shopItems).values({
+       guildId, itemId, kind: body.kind, name: body.name, description: body.description,
+       price: body.price, roleId: body.roleId ?? null, stock: body.stock ?? null,
+       enabled: body.enabled, isDefault: false, sortOrder: existing.length,
+-    });
+-    await this.database.db.insert(economyAuditLog).values({
+-      guildId, actorId: req.session!.userId, source: 'dashboard', action: 'economy.item.create',
+-      after: body as unknown as Record<string, unknown>,
+-    });
++    }).returning();
++    await Promise.all([
++      this.database.db.insert(economyAuditLog).values({
++        guildId, actorId: req.session!.userId, source: 'dashboard', action: 'economy.item.create',
++        after: body as unknown as Record<string, unknown>,
++      }),
++      this.setup.invalidateCache(guildId),
++    ]);
+     this.messages.scheduleStoreAndRulesSync(guildId, req.guild!.name);
+-    await this.setup.invalidateCache(guildId);
+-    return { ok: true };
++    return { ok: true, item: created };
+   }
+ 
+   @Put('items/:itemId')
+@@ -145,20 +166,22 @@ export class EconomyController {
+     @Req() req: AuthedRequest,
+     @Body(new ZodValidationPipe(shopItemSchema.partial())) body: Partial<z.infer<typeof shopItemSchema>>,
+   ) {
+-    await this.database.db.update(shopItems).set({
+-      ...(body.name !== undefined ? { name: body.name } : {}),
+-      ...(body.description !== undefined ? { description: body.description } : {}),
+-      ...(body.price !== undefined ? { price: body.price } : {}),
+-      ...(body.enabled !== undefined ? { enabled: body.enabled } : {}),
+-      ...(body.stock !== undefined ? { stock: body.stock } : {}),
+-      ...(body.roleId !== undefined ? { roleId: body.roleId } : {}),
+-    }).where(and(eq(shopItems.guildId, guildId), eq(shopItems.itemId, itemId)));
+-    await this.database.db.insert(economyAuditLog).values({
+-      guildId, actorId: req.session!.userId, source: 'dashboard', action: 'economy.item.update',
+-      after: body as unknown as Record<string, unknown>,
+-    });
+-    this.messages.scheduleStoreAndRulesSync(guildId, req.guild!.name);
++    await Promise.all([
++      this.database.db.update(shopItems).set({
++        ...(body.name !== undefined ? { name: body.name } : {}),
++        ...(body.description !== undefined ? { description: body.description } : {}),
++        ...(body.price !== undefined ? { price: body.price } : {}),
++        ...(body.enabled !== undefined ? { enabled: body.enabled } : {}),
++        ...(body.stock !== undefined ? { stock: body.stock } : {}),
++        ...(body.roleId !== undefined ? { roleId: body.roleId } : {}),
++      }).where(and(eq(shopItems.guildId, guildId), eq(shopItems.itemId, itemId))),
++      this.database.db.insert(economyAuditLog).values({
++        guildId, actorId: req.session!.userId, source: 'dashboard', action: 'economy.item.update',
++        after: body as unknown as Record<string, unknown>,
++      }),
++    ]);
+     await this.setup.invalidateCache(guildId);
++    this.messages.scheduleStoreAndRulesSync(guildId, req.guild!.name);
+     return { ok: true };
+   }
+ 
+@@ -178,39 +201,53 @@ export class EconomyController {
+           .where(and(eq(shopItems.guildId, guildId), eq(shopItems.itemId, itemId)));
+       }
+     });
+-    await this.database.db.insert(economyAuditLog).values({
+-      guildId, actorId: req.session!.userId, source: 'dashboard', action: 'economy.items.reorder',
+-      after: { itemIds: body.itemIds },
+-    });
++    await Promise.all([
++      this.database.db.insert(economyAuditLog).values({
++        guildId, actorId: req.session!.userId, source: 'dashboard', action: 'economy.items.reorder',
++        after: { itemIds: body.itemIds },
++      }),
++      this.setup.invalidateCache(guildId),
++    ]);
+     this.messages.scheduleStoreAndRulesSync(guildId, req.guild!.name);
+-    await this.setup.invalidateCache(guildId);
+     return { ok: true };
+   }
+ 
+   @Delete('items/:itemId')
+   async deleteItem(@Param('guildId') guildId: string, @Param('itemId') itemId: string, @Req() req: AuthedRequest) {
+-    await this.database.db.delete(shopItems).where(and(eq(shopItems.guildId, guildId), eq(shopItems.itemId, itemId)));
+-    await this.database.db.insert(economyAuditLog).values({
+-      guildId, actorId: req.session!.userId, source: 'dashboard', action: 'economy.item.delete',
+-      after: { itemId },
+-    });
+-    this.messages.scheduleStoreAndRulesSync(guildId, req.guild!.name);
++    await Promise.all([
++      this.database.db.delete(shopItems).where(and(eq(shopItems.guildId, guildId), eq(shopItems.itemId, itemId))),
++      this.database.db.insert(economyAuditLog).values({
++        guildId, actorId: req.session!.userId, source: 'dashboard', action: 'economy.item.delete',
++        after: { itemId },
++      }),
++    ]);
+     await this.setup.invalidateCache(guildId);
++    this.messages.scheduleStoreAndRulesSync(guildId, req.guild!.name);
+     return { ok: true };
+   }
+ 
+   @Get('roles')
+   async safeRoles(@Param('guildId') guildId: string) {
+-    const roles = await this.discord.getGuildRoles(guildId);
+-    const botMember = await this.discord.getGuildMember(guildId, process.env.DISCORD_CLIENT_ID ?? '');
+-    const botHighestPosition = Math.max(...roles.filter((role) => botMember.roles.includes(role.id)).map((role) => role.position), -1);
+-    return { roles: roles.map((role) => ({
+-      id: role.id,
+-      name: role.name,
+-      color: role.color,
+-      position: role.position,
+-      reason: roleSafetyReason(role, guildId, botHighestPosition),
+-    })).filter((role) => role.id !== guildId).sort((a, b) => b.position - a.position) };
++    const [roles, botMember] = await Promise.all([
++      this.discord.getGuildRoles(guildId),
++      this.discord.getGuildMember(guildId, this.botClientId()),
++    ]);
++    const highestBotRole = findHighestBotRole(roles, botMember.roles);
++    const botHighestPosition = highestBotRole?.position ?? -1;
++    const botHighestRoleId = highestBotRole?.id ?? null;
++
++    return {
++      roles: roles
++        .filter((role) => role.id !== guildId && !isBotOrManagedRole(role))
++        .map((role) => ({
++          id: role.id,
++          name: role.name,
++          color: role.color,
++          position: role.position,
++          reason: roleSafetyReason(role, guildId, botHighestPosition, botHighestRoleId),
++        }))
++        .sort((a, b) => b.position - a.position),
++    };
+   }
+ 
+   @Post('delete-channels')
+@@ -223,22 +260,31 @@ export class EconomyController {
+     const rows = await this.database.db.select().from(economySettings).where(eq(economySettings.guildId, guildId)).limit(1);
+     const row = rows[0];
+     if (!row) return { ok: true };
+-    for (const id of [row.rulesChannelId, row.commandsChannelId, row.leaderboardChannelId, row.storeChannelId, row.heistLogChannelId, row.announcementsChannelId, row.categoryId]) {
+-      if (id) await this.discord.deleteGuildChannel(id).catch(() => undefined);
+-    }
+-    await this.database.db.update(economySettings).set({
+-      enabled: false,
+-      categoryId: null,
+-      rulesChannelId: null,
+-      commandsChannelId: null,
+-      leaderboardChannelId: null,
+-      storeChannelId: null,
+-      heistLogChannelId: null,
+-      announcementsChannelId: null,
+-    }).where(eq(economySettings.guildId, guildId));
+-    await this.database.db.insert(economyAuditLog).values({
+-      guildId, actorId: req.session!.userId, source: 'dashboard', action: 'economy.channels.delete',
+-    });
++    const channelIds = [
++      row.rulesChannelId,
++      row.commandsChannelId,
++      row.leaderboardChannelId,
++      row.storeChannelId,
++      row.heistLogChannelId,
++      row.announcementsChannelId,
++      row.categoryId,
++    ].filter((id): id is string => Boolean(id));
++    await Promise.all(channelIds.map((id) => this.discord.deleteGuildChannel(id).catch(() => undefined)));
++    await Promise.all([
++      this.database.db.update(economySettings).set({
++        enabled: false,
++        categoryId: null,
++        rulesChannelId: null,
++        commandsChannelId: null,
++        leaderboardChannelId: null,
++        storeChannelId: null,
++        heistLogChannelId: null,
++        announcementsChannelId: null,
++      }).where(eq(economySettings.guildId, guildId)),
++      this.database.db.insert(economyAuditLog).values({
++        guildId, actorId: req.session!.userId, source: 'dashboard', action: 'economy.channels.delete',
++      }),
++    ]);
+     await this.setup.invalidateCache(guildId);
+     return { ok: true };
+   }
+diff --git a/backend/src/economy/wallet.service.ts b/backend/src/economy/wallet.service.ts
+index 8927a58..3f8da63 100644
+--- a/backend/src/economy/wallet.service.ts
++++ b/backend/src/economy/wallet.service.ts
+@@ -1,3 +1,4 @@
++import { randomInt } from 'node:crypto';
+ import { BadRequestException, Injectable } from '@nestjs/common';
+ import { and, eq, gt, inArray, isNull, or, sql } from 'drizzle-orm';
+ import { DatabaseService, type Db } from '../db/database.service';
+@@ -123,6 +124,118 @@ export class WalletService {
+     });
+   }
+ 
++  async purchaseRandomDex(guildId: string, userId: string, itemId: string) {
++    return this.database.db.transaction(async (tx) => {
++      const items = await tx.select().from(shopItems)
++        .where(and(
++          eq(shopItems.guildId, guildId),
++          eq(shopItems.itemId, itemId),
++          eq(shopItems.kind, 'randomdex'),
++          eq(shopItems.enabled, true),
++        )).for('update').limit(1);
++      const item = items[0];
++      if (!item) throw new BadRequestException('That item is not available.');
++      if (item.stock !== null && item.stock <= 0) throw new BadRequestException('That item is out of stock.');
++
++      await this.ensureWallet(tx, guildId, userId);
++      const charged = await tx.update(economyWallets).set({
++        balance: sql`${economyWallets.balance} - ${item.price}`,
++        updatedAt: new Date(),
++      }).where(and(
++        eq(economyWallets.guildId, guildId),
++        eq(economyWallets.userId, userId),
++        sql`${economyWallets.balance} >= ${item.price}`,
++      )).returning();
++      if (!charged[0]) {
++        throw new InsufficientCoinsError(`You do not have enough Dex to purchase ${item.name}.`);
++      }
++
++      if (item.stock !== null) {
++        const stocked = await tx.update(shopItems).set({
++          stock: sql`${shopItems.stock} - 1`,
++        }).where(and(
++          eq(shopItems.guildId, guildId),
++          eq(shopItems.itemId, itemId),
++          gt(shopItems.stock, 0),
++        )).returning({ id: shopItems.id });
++        if (!stocked[0]) throw new BadRequestException('That item is out of stock.');
++      }
++
++      const reward = randomInt(1, 101);
++      const credited = await tx.update(economyWallets).set({
++        balance: sql`${economyWallets.balance} + ${reward}`,
++        totalEarned: sql`${economyWallets.totalEarned} + ${reward}`,
++        updatedAt: new Date(),
++      }).where(and(
++        eq(economyWallets.guildId, guildId),
++        eq(economyWallets.userId, userId),
++      )).returning();
++
++      await tx.insert(economyTransactions).values([
++        { guildId, userId, type: 'purchase', amount: item.price, note: item.name },
++        { guildId, userId, type: 'randomdex_reward', amount: reward, note: `${item.name} payout` },
++      ]);
++
++      return {
++        name: item.name,
++        price: item.price,
++        reward,
++        net: reward - item.price,
++        balance: credited[0]?.balance ?? (charged[0].balance + reward),
++      };
++    });
++  }
++
++  async sendDex(guildId: string, senderId: string, receiverId: string, amount: number, now = new Date()) {
++    if (senderId === receiverId) throw new BadRequestException('You cannot send Dex to yourself.');
++    if (!Number.isSafeInteger(amount) || amount <= 0) {
++      throw new BadRequestException('Amount must be a positive whole number.');
++    }
++    const orderedIds = [senderId, receiverId].sort();
++    return this.database.db.transaction(async (tx) => {
++      await this.ensureWallet(tx, guildId, senderId);
++      await this.ensureWallet(tx, guildId, receiverId);
++      await tx.select({ userId: economyWallets.userId }).from(economyWallets)
++        .where(and(eq(economyWallets.guildId, guildId), inArray(economyWallets.userId, orderedIds)))
++        .orderBy(economyWallets.userId)
++        .for('update');
++
++      const senderUpdate = await tx.update(economyWallets).set({
++        balance: sql`${economyWallets.balance} - ${amount}`,
++        updatedAt: now,
++      }).where(and(
++        eq(economyWallets.guildId, guildId),
++        eq(economyWallets.userId, senderId),
++        sql`${economyWallets.balance} >= ${amount}`,
++      )).returning();
++      if (!senderUpdate[0]) {
++        const sender = await this.getWallet(tx, guildId, senderId);
++        throw new InsufficientCoinsError(
++          `You do not have enough Dex in your vault. Your current balance is ${sender?.balance ?? 0} Dex.`,
++        );
++      }
++
++      const receiverUpdate = await tx.update(economyWallets).set({
++        balance: sql`${economyWallets.balance} + ${amount}`,
++        totalEarned: sql`${economyWallets.totalEarned} + ${amount}`,
++        updatedAt: now,
++      }).where(and(
++        eq(economyWallets.guildId, guildId),
++        eq(economyWallets.userId, receiverId),
++      )).returning();
++
++      await tx.insert(economyTransactions).values([
++        { guildId, userId: senderId, type: 'transfer_sent', amount, otherUserId: receiverId },
++        { guildId, userId: receiverId, type: 'transfer_received', amount, otherUserId: senderId },
++      ]);
++
++      return {
++        senderBalance: senderUpdate[0].balance,
++        receiverBalance: receiverUpdate[0]?.balance ?? amount,
++      };
++    });
++  }
++
+   async checkRobAttemptPrerequisites(
+     guildId: string,
+     thiefId: string,
+diff --git a/backend/src/guilds/auto-roles.service.ts b/backend/src/guilds/auto-roles.service.ts
+index 74864a4..cbf2d97 100644
+--- a/backend/src/guilds/auto-roles.service.ts
++++ b/backend/src/guilds/auto-roles.service.ts
+@@ -69,15 +69,17 @@ export class AutoRolesService {
+   ) {}
+ 
+   async get(guild: GuildRow): Promise<AutoRoleResponse> {
+-    const settings = await this.cache.get(guild.id);
++    const [settings, roles] = await Promise.all([
++      this.cache.get(guild.id),
++      this.guildSync.getRoles(guild.id),
++    ]);
+     const config = normalizeAutoRoleConfig(settings.autoRoles);
+-    const roles = await this.guildSync.getRoles(guild.id);
+-    const botStatus = await this.guildSync.getBotStatus(guild.id, roles);
++    const [botStatus, canSendInChannel] = await Promise.all([
++      this.guildSync.getBotStatus(guild.id, roles),
++      config.announce.channelId ? this.canSendInChannel(config.announce.channelId) : Promise.resolve(false),
++    ]);
+     const roleView = this.classifyRoles(guild.id, roles, botStatus);
+     const selectedId = config.roleIds[0];
+-    const canSendInChannel = config.announce.channelId
+-      ? await this.canSendInChannel(config.announce.channelId)
+-      : false;
+     return {
+       config,
+       roles: roleView,
+@@ -158,8 +160,10 @@ export class AutoRolesService {
+       }
+       await tx.insert(auditLogs).values({ guildId: guild.id, userId: session.userId, action: 'auto_roles.update' });
+     });
+-    await this.cache.invalidate(guild.id);
+-    await this.publishRevision(guild.id, 'settings', 'updated');
++    await Promise.all([
++      this.cache.invalidate(guild.id),
++      this.publishRevision(guild.id, 'settings', 'updated'),
++    ]);
+     if (channelToRefresh) {
+       void this.refreshChannelAccess(guild.id, channelToRefresh, config.announce.embed.enabled).catch((error: unknown) => {
+         this.logger.error(
+diff --git a/backend/src/shared/auto-roles.spec.ts b/backend/src/shared/auto-roles.spec.ts
+index d2d1e99..4707416 100644
+--- a/backend/src/shared/auto-roles.spec.ts
++++ b/backend/src/shared/auto-roles.spec.ts
+@@ -204,5 +204,6 @@ describe('auto-role helpers', () => {
+ 
+     expect(getAutoRoleSafetyReason('100000000000000000', samePositionBelow, botStatus)).toBeNull();
+     expect(getAutoRoleSafetyReason('100000000000000000', samePositionAbove, botStatus)).toBe('above the bot\'s role');
++    expect(getAutoRoleSafetyReason('100000000000000000', { ...samePositionBelow, id: botStatus.highestRoleId }, botStatus)).toBe('above the bot\'s role');
+   });
+ });
+diff --git a/backend/src/shared/auto-roles.ts b/backend/src/shared/auto-roles.ts
+index 40367b9..0c0bc95 100644
+--- a/backend/src/shared/auto-roles.ts
++++ b/backend/src/shared/auto-roles.ts
+@@ -302,7 +302,7 @@ export function getAutoRoleSafetyReason(
+     ? compareAutoRoleHierarchy(role, {
+       id: botStatus.highestRoleId,
+       position: botStatus.highestPosition,
+-    }) > 0
++    }) >= 0
+     : role.position >= botStatus.highestPosition;
+   if (aboveBot) return 'above the bot\'s role';
+   const danger =
+diff --git a/backend/src/welcome/welcome.service.ts b/backend/src/welcome/welcome.service.ts
+index f6b250f..fea71bb 100644
+--- a/backend/src/welcome/welcome.service.ts
++++ b/backend/src/welcome/welcome.service.ts
+@@ -85,18 +85,17 @@ export class WelcomeService {
+     if (config.enabled && !config.channelId) {
+       throw new BadRequestException({ message: 'Validation failed', issues: [{ path: 'channelId', message: 'Choose a channel to post in' }] });
+     }
+-    if (config.channelId) {
+-      const channels = await this.guilds.getChannels(guild.id);
+-      if (!channels.some((c) => c.id === config.channelId)) {
+-        throw new BadRequestException({
+-          message: 'Validation failed',
+-          issues: [{ path: 'channelId', message: 'That channel does not exist in this server' }],
+-        });
+-      }
+-    }
+-
+     this.assertBackgroundOwnership(guild, config);
+-    const before = await this.cache.get(guild.id);
++    const [channels, before] = await Promise.all([
++      config.channelId ? this.guilds.getChannels(guild.id) : Promise.resolve(null),
++      this.cache.get(guild.id),
++    ]);
++    if (config.channelId && channels && !channels.some((c) => c.id === config.channelId)) {
++      throw new BadRequestException({
++        message: 'Validation failed',
++        issues: [{ path: 'channelId', message: 'That channel does not exist in this server' }],
++      });
++    }
+     const other = kind === 'welcome' ? 'goodbye' : 'welcome';
+     const now = new Date();
+     await this.database.db.transaction(async (tx) => {
+diff --git a/frontend/src/app/dashboard/[guildId]/economy/page.tsx b/frontend/src/app/dashboard/[guildId]/economy/page.tsx
+index 01d5629..0db3cc3 100644
+--- a/frontend/src/app/dashboard/[guildId]/economy/page.tsx
++++ b/frontend/src/app/dashboard/[guildId]/economy/page.tsx
+@@ -489,7 +489,7 @@ function EconomyEditor({
+           </div>
+         )}
+         {rolesData?.roles.some((role) => role.reason) && (
+-          <p className="mb-3 text-xs text-muted-foreground">Roles that the bot cannot safely assign are unavailable for purchase.</p>
++          <p className="mb-3 text-xs text-muted-foreground">Roles positioned at or above DexBotX’s highest role are hidden until DexBotX’s role is moved higher in Discord. Bot and integration roles are automatically filtered out.</p>
+         )}
+         {rolesError && (
+           <div className="mb-3 flex flex-wrap items-center gap-2 text-sm" role="alert">
+@@ -502,29 +502,33 @@ function EconomyEditor({
+         <form className="mb-5 grid gap-4 rounded-lg border border-border p-4 sm:grid-cols-[1fr_180px_auto] sm:items-end" aria-labelledby="economy-add-role-heading" noValidate onSubmit={stageRole}>
+           <div className="sm:col-span-3">
+             <h3 id="economy-add-role-heading" className="text-sm font-medium">Add a purchasable server role</h3>
+-            <p className="mt-1 text-xs text-muted-foreground">Choose a safe server role and set its price in Dex. The store message updates when you add it.</p>
++            <p className="mt-1 text-xs text-muted-foreground">Add any server role below DexBotX’s highest role (including manager or staff roles) and set its price in Dex. Bot roles are automatically filtered out.</p>
+           </div>
+           <Field label="Server role" htmlFor="economy-role-id">
+-            <Select
+-              id="economy-role-id"
+-              name="roleId"
+-              required
+-              value={roleId}
+-              aria-invalid={!!fieldIssue(roleCreationIssues, 'roleId')}
+-              aria-describedby={fieldIssue(roleCreationIssues, 'roleId') ? 'economy-role-id-error' : undefined}
+-              disabled={savingChanges || rolesLoading || itemsLoading || !!rolesError || !!itemsError || availableRoles.length === 0}
+-              onChange={(event) => {
+-                setRoleId(event.target.value);
+-                setRoleCreationIssues((current) => {
+-                  const next = { ...current };
+-                  delete next.roleId;
+-                  return next;
+-                });
+-              }}
+-            >
+-              <option value="" disabled>Choose a role</option>
+-              {availableRoles.map((role) => <option key={role.id} value={role.id}>{role.name}</option>)}
+-            </Select>
++            {rolesLoading ? (
++              <Skeleton className="h-10 w-full rounded-lg" />
++            ) : (
++              <Select
++                id="economy-role-id"
++                name="roleId"
++                required
++                value={roleId}
++                aria-invalid={!!fieldIssue(roleCreationIssues, 'roleId')}
++                aria-describedby={fieldIssue(roleCreationIssues, 'roleId') ? 'economy-role-id-error' : undefined}
++                disabled={savingChanges || itemsLoading || !!rolesError || !!itemsError || availableRoles.length === 0}
++                onChange={(event) => {
++                  setRoleId(event.target.value);
++                  setRoleCreationIssues((current) => {
++                    const next = { ...current };
++                    delete next.roleId;
++                    return next;
++                  });
++                }}
++              >
++                <option value="" disabled>{availableRoles.length === 0 ? 'No eligible roles below DexBotX' : 'Choose a role'}</option>
++                {availableRoles.map((role) => <option key={role.id} value={role.id}>{role.name}</option>)}
++              </Select>
++            )}
+             {fieldIssue(roleCreationIssues, 'roleId') && (
+               <p id="economy-role-id-error" className="mt-1 text-xs text-destructive">
+                 {fieldIssue(roleCreationIssues, 'roleId')}
+diff --git a/frontend/src/components/dashboard/loading-skeleton.tsx b/frontend/src/components/dashboard/loading-skeleton.tsx
+index d5740fe..da3af90 100644
+--- a/frontend/src/components/dashboard/loading-skeleton.tsx
++++ b/frontend/src/components/dashboard/loading-skeleton.tsx
+@@ -3,28 +3,60 @@ import { Skeleton } from '@/components/ui/misc';
+ export function GuildListSkeleton() {
+   return (
+     <div aria-busy="true" aria-label="Loading servers" role="status" className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+-      {Array.from({ length: 6 }, (_, index) => <Skeleton key={index} className="h-36" />)}
++      {Array.from({ length: 6 }, (_, index) => (
++        <div key={index} className="space-y-4 rounded-xl border border-border bg-card p-5">
++          <div className="flex items-center gap-3">
++            <Skeleton className="size-11 shrink-0 rounded-xl" />
++            <div className="min-w-0 flex-1 space-y-2">
++              <Skeleton className="h-4 w-3/4" />
++              <Skeleton className="h-3 w-1/2" />
++            </div>
++          </div>
++          <Skeleton className="h-10 w-full rounded-lg" />
++        </div>
++      ))}
+     </div>
+   );
+ }
+ 
+ export function EditorSkeleton({ title = 'Welcome message', description = 'Sent when someone joins your server.' }: { title?: string; description?: string }) {
+   return (
+-    <section aria-busy="true" aria-label="Loading configuration" className="space-y-6">
++    <section aria-busy="true" aria-label="Loading configuration" role="status" className="space-y-6">
+       <header className="flex flex-wrap items-start justify-between gap-4">
+         <div>
+           <h1 className="text-2xl font-semibold">{title}</h1>
+           <p className="mt-1 text-sm text-muted-foreground">{description}</p>
+         </div>
+-        <Skeleton className="h-9 w-24" />
++        <div className="flex items-center gap-2">
++          <Skeleton className="h-7 w-20 rounded-lg" />
++          <Skeleton className="h-6 w-11 rounded-full" />
++        </div>
+       </header>
+       <div className="grid grid-cols-1 items-start gap-6 lg:grid-cols-[minmax(0,1fr)_440px]">
+         <div className="space-y-4">
+-          <Skeleton className="h-32" />
+-          <Skeleton className="h-32" />
+-          <Skeleton className="h-32" />
++          {Array.from({ length: 3 }, (_, index) => (
++            <div key={index} className="space-y-3 rounded-xl border border-border bg-card p-5">
++              <Skeleton className="h-5 w-36" />
++              <Skeleton className="h-3.5 w-2/3" />
++              <Skeleton className="h-10 w-full rounded-lg" />
++            </div>
++          ))}
++        </div>
++        <div className="space-y-3">
++          <Skeleton className="h-4 w-32" />
++          <div className="space-y-4 rounded-xl border border-border bg-card p-4">
++            <Skeleton className="h-5 w-40" />
++            <div className="flex gap-3">
++              <Skeleton className="size-10 shrink-0 rounded-full" />
++              <div className="flex-1 space-y-2">
++                <Skeleton className="h-4 w-32" />
++                <Skeleton className="h-4 w-full" />
++                <Skeleton className="h-28 w-full rounded-lg" />
++              </div>
++            </div>
++          </div>
++          <Skeleton className="h-10 w-full rounded-lg" />
+         </div>
+-        <Skeleton className="h-80 rounded-xl" />
+       </div>
+     </section>
+   );
+@@ -38,21 +70,48 @@ export function EconomySkeleton() {
+           <h1 className="text-2xl font-semibold">Economy</h1>
+           <p className="mt-1 text-sm text-muted-foreground">Manage the economy and set Dex prices for purchasable server roles.</p>
+         </div>
+-        <Skeleton className="h-9 w-24" />
++        <div className="flex items-center gap-2">
++          <Skeleton className="h-7 w-20 rounded-lg" />
++          <Skeleton className="h-6 w-11 rounded-full" />
++        </div>
+       </header>
+-      <Skeleton className="h-28" />
++      <div className="flex items-center justify-between gap-4 rounded-xl border border-border bg-card p-5">
++        <div className="space-y-2">
++          <Skeleton className="h-5 w-24" />
++          <Skeleton className="h-4 w-32" />
++        </div>
++        <Skeleton className="h-9 w-24 rounded-lg" />
++      </div>
+       <div className="space-y-4 rounded-xl border border-border bg-card p-5">
+         <div className="space-y-2">
+           <Skeleton className="h-5 w-36" />
+           <Skeleton className="h-4 w-3/4" />
+         </div>
+-        <div className="grid gap-4 sm:grid-cols-[1fr_180px_auto]">
+-          <Skeleton className="h-10" />
+-          <Skeleton className="h-10" />
+-          <Skeleton className="h-10 w-36" />
++        <div className="grid gap-4 rounded-lg border border-border p-4 sm:grid-cols-[1fr_180px_auto] sm:items-end">
++          <div className="space-y-2">
++            <Skeleton className="h-3.5 w-24" />
++            <Skeleton className="h-10 w-full rounded-lg" />
++          </div>
++          <div className="space-y-2">
++            <Skeleton className="h-3.5 w-20" />
++            <Skeleton className="h-10 w-full rounded-lg" />
++          </div>
++          <Skeleton className="h-10 w-36 rounded-lg" />
++        </div>
++        <div className="space-y-2">
++          <Skeleton className="h-4 w-32" />
++          {Array.from({ length: 2 }, (_, index) => (
++            <div key={index} className="grid gap-3 rounded-lg border border-border p-3 sm:grid-cols-[1fr_110px_100px_auto] sm:items-center">
++              <div className="space-y-1.5">
++                <Skeleton className="h-4 w-36" />
++                <Skeleton className="h-3 w-48" />
++              </div>
++              <Skeleton className="h-9 w-full rounded-lg" />
++              <Skeleton className="h-6 w-16 rounded-full" />
++              <Skeleton className="size-9 rounded-lg" />
++            </div>
++          ))}
+         </div>
+-        <Skeleton className="h-16" />
+-        <Skeleton className="h-16" />
+       </div>
+     </section>
+   );
+@@ -60,13 +119,23 @@ export function EconomySkeleton() {
+ 
+ export function OverviewSkeleton() {
+   return (
+-    <section aria-busy="true" aria-label="Loading overview" className="space-y-6">
++    <section aria-busy="true" aria-label="Loading overview" role="status" className="space-y-6">
+       <header>
+         <h1 className="text-2xl font-semibold">Overview</h1>
+         <p className="mt-1 text-sm text-muted-foreground">Your server modules at a glance.</p>
+       </header>
+       <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+-        {Array.from({ length: 6 }, (_, index) => <Skeleton key={index} className="h-36" />)}
++        {Array.from({ length: 6 }, (_, index) => (
++          <div key={index} className="flex min-h-52 flex-col rounded-xl border border-border bg-card p-5">
++            <div className="flex items-start justify-between gap-3">
++              <Skeleton className="size-10 rounded-lg" />
++              <Skeleton className="h-6 w-20 rounded-lg" />
++            </div>
++            <Skeleton className="mt-4 h-5 w-32" />
++            <Skeleton className="mt-2 h-4 w-4/5" />
++            <Skeleton className="mt-auto h-11 w-full rounded-lg" />
++          </div>
++        ))}
+       </div>
+     </section>
+   );
+diff --git a/frontend/src/components/dashboard/top-bar.tsx b/frontend/src/components/dashboard/top-bar.tsx
+index adcc16c..4f8d061 100644
+--- a/frontend/src/components/dashboard/top-bar.tsx
++++ b/frontend/src/components/dashboard/top-bar.tsx
+@@ -12,7 +12,7 @@ import type { RealtimeStatus } from '@/lib/realtime';
+ import { useGetMeQuery } from '@/store/api';
+ import { MobileNav } from './mobile-nav';
+ 
+-export function DashboardTopBar({ guildId, guild, lastSyncedLabel, refreshing, cooldownSeconds, onRefresh, realtimeStatus }: { guildId?: string; guild?: GuildDetail; lastSyncedLabel?: string; refreshing?: boolean; cooldownSeconds?: number; onRefresh?: () => void; realtimeStatus?: RealtimeStatus }) {
++export function DashboardTopBar({ guildId, guild, lastSyncedLabel, refreshing, cooldownSeconds, onRefresh }: { guildId?: string; guild?: GuildDetail; lastSyncedLabel?: string; refreshing?: boolean; cooldownSeconds?: number; onRefresh?: () => void; realtimeStatus?: RealtimeStatus }) {
+   const { data: me, isLoading: loadingMe } = useGetMeQuery();
+   return (
+     <header className="sticky top-0 z-30 h-14 border-b border-border bg-surface">
+@@ -41,15 +41,6 @@ export function DashboardTopBar({ guildId, guild, lastSyncedLabel, refreshing, c
+           ) : guildId ? (
+             <Skeleton className="hidden size-11 shrink-0 sm:block" />
+           ) : null}
+-          {guildId && (
+-            <span className="flex items-center gap-1.5 text-xs text-muted-foreground" role="status" aria-live="polite">
+-              <span
+-                aria-hidden="true"
+-                className={`size-2 rounded-full ${realtimeStatus === 'live' ? 'bg-success' : 'bg-warning animate-pulse motion-reduce:animate-none'}`}
+-              />
+-              {realtimeStatus === 'live' ? 'Live' : 'Reconnecting'}
+-            </span>
+-          )}
+           <ThemeToggle />
+           {me ? <UserMenu me={me as Me} /> : loadingMe ? <Skeleton className="h-11 w-11 shrink-0 sm:w-28" /> : null}
+         </div>
+diff --git a/frontend/src/store/api.ts b/frontend/src/store/api.ts
+index 32a9826..f2d2fe6 100644
+--- a/frontend/src/store/api.ts
++++ b/frontend/src/store/api.ts
+@@ -237,8 +237,22 @@ export const api = createApi({
+       },
+       invalidatesTags: (_r, _e, { guildId }) => [{ type: 'Economy', id: `${guildId}:items` }],
+     }),
+-    createEconomyItem: b.mutation<{ ok: true }, { guildId: string; item: Partial<EconomyItem> }>({
++    createEconomyItem: b.mutation<{ ok: true; item?: EconomyItem }, { guildId: string; item: Partial<EconomyItem> }>({
+       query: ({ guildId, item }) => ({ url: `/guilds/${guildId}/economy/items`, method: 'POST', body: item }),
++      async onQueryStarted({ guildId }, { dispatch, queryFulfilled }) {
++        try {
++          const { data } = await queryFulfilled;
++          if (data?.item) {
++            dispatch(api.util.updateQueryData('getEconomyItems', guildId, (draft) => {
++              if (!draft.items.some((entry) => entry.itemId === data.item!.itemId)) {
++                draft.items.push(data.item!);
++              }
++            }));
++          }
++        } catch {
++          // Handled by caller
++        }
++      },
+       invalidatesTags: (_r, _e, { guildId }) => [{ type: 'Economy', id: `${guildId}:items` }],
+     }),
+     reorderEconomyItems: b.mutation<{ ok: true }, { guildId: string; itemIds: string[] }>({

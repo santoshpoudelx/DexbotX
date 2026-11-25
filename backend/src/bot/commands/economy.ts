@@ -9,6 +9,11 @@ export const buyCommand = new SlashCommandBuilder().setName('buy').setDescriptio
 export const giftCommand = new SlashCommandBuilder().setName('gift').setDescription('Gift Dex to another member').setContexts(InteractionContextType.Guild)
   .addUserOption((option) => option.setName('user').setDescription('Member to receive the gift').setRequired(true))
   .addIntegerOption((option) => option.setName('amount').setDescription('Amount in Dex to gift').setRequired(true).setMinValue(1).setMaxValue(2000));
+export const sendDexCommand = new SlashCommandBuilder().setName('senddex').setDescription('Send any amount of Dex from your vault to another member').setContexts(InteractionContextType.Guild)
+  .addUserOption((option) => option.setName('user').setDescription('Member to receive Dex').setRequired(true))
+  .addIntegerOption((option) => option.setName('amount').setDescription('Amount of Dex to send from your vault').setRequired(true).setMinValue(1).setMaxValue(1_000_000_000));
+export const get5kDexCommand = new SlashCommandBuilder().setName('get5kdex').setDescription('Testing command to add 5,000 Dex to your vault').setContexts(InteractionContextType.Guild)
+  .setDefaultMemberPermissions(PermissionFlagsBits.Administrator);
 export const robUserCommand = new SlashCommandBuilder().setName('robuser').setDescription('Rob a member using a Robbingusertool').setContexts(InteractionContextType.Guild)
   .addUserOption((option) => option.setName('user').setDescription('Member to target').setRequired(true));
 export const leaderboardCommand = new SlashCommandBuilder().setName('leaderboard').setDescription('View the richest members').setContexts(InteractionContextType.Guild);
@@ -30,6 +35,6 @@ export const economyCommand = new SlashCommandBuilder().setName('economy').setDe
   .addSubcommand((sub) => sub.setName('help').setDescription('Show short economy help'));
 
 export const economyCommands = [
-  rewardCommand, balanceCommand, shopCommand, storeCommand, buyCommand, giftCommand, robUserCommand,
-  leaderboardCommand, economyCommand,
+  rewardCommand, balanceCommand, shopCommand, storeCommand, buyCommand, giftCommand, sendDexCommand,
+  get5kDexCommand, robUserCommand, leaderboardCommand, economyCommand,
 ];

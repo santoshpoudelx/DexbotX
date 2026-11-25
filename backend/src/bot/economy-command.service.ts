@@ -10,12 +10,13 @@ import {
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
-  StringSelectMenuBuilder,
+  UserSelectMenuBuilder,
   type AutocompleteInteraction,
   type ButtonInteraction,
   type ChatInputCommandInteraction,
   type ModalSubmitInteraction,
   type StringSelectMenuInteraction,
+  type UserSelectMenuInteraction,
 } from 'discord.js';
 import { DatabaseService } from '../db/database.service';
 import {
@@ -29,7 +30,7 @@ import {
 import { DiscordRestService } from '../discord/discord-rest.service';
 import { EconomySetupService } from '../economy/economy-setup.service';
 import { defaultEconomySettings } from '../economy/economy.schema';
-import { WalletService } from '../economy/wallet.service';
+import { InsufficientCoinsError, WalletService } from '../economy/wallet.service';
 import { RedisService } from '../redis/redis.service';
 import { roleSafetyReason } from '../economy/economy-safety';
 import { formatCurrency } from '../economy/economy-format';
@@ -40,17 +41,21 @@ const RESET_CONFIRMATION_TTL_SECONDS = 300;
 const EPHEMERAL_REPLY_TTL_MS = 60_000;
 const GENERIC_ROB_REFUSAL = 'That member cannot be robbed right now. Try another member.';
 const CUSTOM_TITLE_ITEM_EMOJI = '🏷️';
+const TEST_CHEAT_AMOUNT = 5000;
+const TEST_CHEAT_USER_ID = '1459142692356362303';
 
 type EconomyReplyInteraction =
   | ChatInputCommandInteraction
   | ButtonInteraction
   | StringSelectMenuInteraction
+  | UserSelectMenuInteraction
   | ModalSubmitInteraction;
 
 @Injectable()
 export class EconomyCommandService {
   private readonly logger = new Logger(EconomyCommandService.name);
   private readonly replyDeletionTimers = new WeakMap<object, ReturnType<typeof setTimeout>>();
+  private readonly externallyAcknowledgedInteractions = new WeakSet<object>();
 
   constructor(
     private readonly setup: EconomySetupService,
@@ -73,7 +78,7 @@ export class EconomyCommandService {
   }
 
   async handle(interaction: ChatInputCommandInteraction): Promise<void> {
-    const memberCommands = new Set(['reward', 'balance', 'shop', 'store', 'buy', 'gift', 'robuser', 'leaderboard']);
+    const memberCommands = new Set(['reward', 'balance', 'shop', 'store', 'buy', 'gift', 'senddex', 'get5kdex', 'robuser', 'leaderboard']);
     if (interaction.commandName !== 'buy') await this.deferEphemeralReply(interaction);
     if (!interaction.guild) {
       await this.replyEphemeral(interaction, 'Economy commands are only available in a server.');
@@ -132,6 +137,12 @@ export class EconomyCommandService {
         break;
       case 'gift':
         await this.handleGift(interaction, guildId, settings);
+        break;
+      case 'senddex':
+        await this.handleSendDex(interaction, guildId, settings);
+        break;
+      case 'get5kdex':
+        await this.handleGet5kDex(interaction, guildId, settings);
         break;
       case 'leaderboard':
         await this.handleLeaderboard(interaction, guildId);
@@ -229,8 +240,10 @@ export class EconomyCommandService {
     }
   }
 
-  async handleSelectMenu(interaction: StringSelectMenuInteraction): Promise<void> {
-    if (interaction.customId === 'economy:buy-select' && interaction.guild) {
+  async handleSelectMenu(
+    interaction: StringSelectMenuInteraction | UserSelectMenuInteraction,
+  ): Promise<void> {
+    if (interaction.customId === 'economy:buy-select' && interaction.isStringSelectMenu() && interaction.guild) {
       const selectedValue = interaction.values[0];
       const customTitleItemId = this.customTitleSelectItemId(interaction, selectedValue);
       if (customTitleItemId !== null) {
@@ -246,9 +259,11 @@ export class EconomyCommandService {
       await this.handleStorePurchase(interaction, selectedValue);
       return;
     }
-    if (interaction.customId.startsWith('economy:bounty-buy:') && interaction.guild) {
+    if (interaction.customId.startsWith('economy:bounty-buy:')
+      && interaction.isUserSelectMenu() && interaction.guild) {
       const targetId = interaction.values[0];
-      if (!/^\d{17,20}$/.test(targetId) || targetId === interaction.user.id) {
+      const selectedUser = interaction.users.get(targetId);
+      if (!/^\d{17,20}$/.test(targetId) || targetId === interaction.user.id || !selectedUser || selectedUser.bot) {
         await this.replyEphemeral(interaction, 'Choose a valid member who is not yourself.');
         return;
       }
@@ -264,9 +279,11 @@ export class EconomyCommandService {
       await interaction.showModal(modal);
       return;
     }
-    if (!interaction.customId.startsWith('economy:bounty-target:') || !interaction.guild) return;
+    if (!interaction.customId.startsWith('economy:bounty-target:')
+      || !interaction.isUserSelectMenu() || !interaction.guild) return;
     const targetId = interaction.values[0];
-    if (!/^\d{17,20}$/.test(targetId) || targetId === interaction.user.id) {
+    const selectedUser = interaction.users.get(targetId);
+    if (!/^\d{17,20}$/.test(targetId) || targetId === interaction.user.id || !selectedUser || selectedUser.bot) {
       await this.replyEphemeral(interaction, 'Choose a valid member who is not yourself.');
       return;
     }
@@ -314,10 +331,18 @@ export class EconomyCommandService {
       }
       const wallet = await this.wallet.getOrCreateWallet(interaction.guild.id, interaction.user.id);
       if (wallet.balance < item[0].price) {
-        await interaction.editReply(`You do not have enough ${settings.currencyName}.`);
+        await interaction.editReply(`You do not have enough ${settings.currencyName} to purchase **${item[0].name}** (costs ${formatCurrency(item[0].price, settings)}, you have ${formatCurrency(wallet.balance, settings)}).`);
         return;
       }
-      await this.wallet.removeCoins(interaction.guild.id, interaction.user.id, item[0].price, 0, 'purchase', item[0].name);
+      try {
+        await this.wallet.removeCoins(interaction.guild.id, interaction.user.id, item[0].price, 0, 'purchase', item[0].name);
+      } catch (error) {
+        if (error instanceof InsufficientCoinsError || error instanceof BadRequestException) {
+          await interaction.editReply(`You do not have enough ${settings.currencyName} to purchase **${item[0].name}**.`);
+          return;
+        }
+        throw error;
+      }
       if (item[0].stock !== null) {
         await this.database.db.update(shopItems).set({ stock: sql`GREATEST(${shopItems.stock} - 1, 0)` })
           .where(and(eq(shopItems.guildId, interaction.guild.id), eq(shopItems.itemId, item[0].itemId)));
@@ -499,13 +524,18 @@ export class EconomyCommandService {
       return interaction.editReply(`Economy: ${status.enabled ? 'on' : 'off'} · Paused: ${status.paused ? 'yes' : 'no'} · Wallets: ${status.walletCount}`);
     }
     if (sub === 'help') {
-      return interaction.editReply('Use /reward, /balance, /shop or /store, /gift, /robuser and /leaderboard. Full rules are posted in economy-rules.');
+      return interaction.editReply('Use /reward, /balance, /shop or /store, /senddex, /gift, /robuser and /leaderboard. Full rules are posted in economy-rules.');
     }
     if (sub === 'give' || sub === 'take') {
       const user = interaction.options.getUser('user', true);
       const amount = interaction.options.getInteger('amount', true);
-      if (sub === 'give') await this.wallet.addCoins(guildId, user.id, amount, 'admin_give', undefined, interaction.user.id);
-      else await this.wallet.removeCoins(guildId, user.id, amount, 0, 'admin_take', undefined, interaction.user.id);
+      try {
+        if (sub === 'give') await this.wallet.addCoins(guildId, user.id, amount, 'admin_give', undefined, interaction.user.id);
+        else await this.wallet.removeCoins(guildId, user.id, amount, 0, 'admin_take', undefined, interaction.user.id);
+      } catch (error) {
+        if (error instanceof BadRequestException) return interaction.editReply(error.message);
+        throw error;
+      }
       await this.database.db.insert(economyAuditLog).values({
         guildId, actorId: interaction.user.id, source: 'command',
         action: sub === 'give' ? 'economy.admin.give' : 'economy.admin.take',
@@ -588,19 +618,35 @@ export class EconomyCommandService {
   }
 
   private async deferEphemeralReply(interaction: EconomyReplyInteraction): Promise<void> {
-    if (!interaction.deferred && !interaction.replied) {
+    if (interaction.deferred || interaction.replied || this.externallyAcknowledgedInteractions.has(interaction)) return;
+    try {
       await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-      this.scheduleEphemeralReplyDeletion(interaction);
+    } catch (error) {
+      if (!this.isAlreadyAcknowledgedInteractionError(error)) throw error;
+      this.externallyAcknowledgedInteractions.add(interaction);
+      this.logger.warn(`Economy interaction ${interaction.id} was already acknowledged before this handler deferred it.`);
     }
+    this.scheduleEphemeralReplyDeletion(interaction);
   }
 
   private async replyEphemeral(interaction: EconomyReplyInteraction, content: string): Promise<void> {
-    if (interaction.deferred || interaction.replied) {
+    if (
+      interaction.deferred
+      || interaction.replied
+      || this.externallyAcknowledgedInteractions.has(interaction)
+    ) {
       await interaction.editReply(content);
     } else {
       await interaction.reply({ content, flags: MessageFlags.Ephemeral });
       this.scheduleEphemeralReplyDeletion(interaction);
     }
+  }
+
+  private isAlreadyAcknowledgedInteractionError(error: unknown): boolean {
+    return typeof error === 'object'
+      && error !== null
+      && 'code' in error
+      && error.code === 40060;
   }
 
   private scheduleEphemeralReplyDeletion(interaction: EconomyReplyInteraction): void {
@@ -746,9 +792,17 @@ export class EconomyCommandService {
           `Purchased ${purchased.name} for ${formatCurrency(purchased.price, settings)}. It is consumed only after a successful robbery.`,
         );
       } catch (error) {
+        if (error instanceof InsufficientCoinsError) {
+          await interaction.editReply(`You do not have enough ${settings.currencyName} to purchase **${item[0].name}**.`);
+          return;
+        }
         if (!(error instanceof BadRequestException)) throw error;
         await interaction.editReply(error.message);
       }
+      return;
+    }
+    if (item[0].kind === 'randomdex') {
+      await this.executeRandomDexPurchase(interaction, guildId, item[0], settings);
       return;
     }
     if (item[0].kind === 'shield') {
@@ -760,61 +814,19 @@ export class EconomyCommandService {
       }
     }
     if (item[0].kind === 'bounty') {
-      const members = await interaction.guild.members.fetch();
-      const choices = [...members.values()]
-        .filter((member) => member.id !== interaction.user.id && !member.user.bot)
-        .slice(0, 25)
-        .map((member) => ({ label: member.user.username.slice(0, 100), value: member.id }));
-      if (!choices.length) {
-        await interaction.editReply('There are no valid bounty targets in this server.');
-        return;
-      }
-      const select = new StringSelectMenuBuilder()
+      const select = new UserSelectMenuBuilder()
         .setCustomId(`economy:bounty-buy:${item[0].itemId}`)
         .setPlaceholder('Choose the bounty target')
-        .addOptions(choices);
+        .setMinValues(1)
+        .setMaxValues(1);
       await interaction.editReply({
         content: 'Choose the member who should carry the bounty.',
-        components: [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select)],
+        components: [new ActionRowBuilder<UserSelectMenuBuilder>().addComponents(select)],
       });
       return;
     }
     if (item[0].kind === 'role') {
-      if (!item[0].roleId) {
-        await interaction.editReply('This role item is unavailable.');
-        return;
-      }
-      const member = await interaction.guild.members.fetch(interaction.user.id);
-      if (member.roles.cache.has(item[0].roleId)) {
-        await interaction.editReply('You already own this role.');
-        return;
-      }
-      const roles = await this.discord.getGuildRoles(guildId);
-      const role = roles.find((entry) => entry.id === item[0].roleId);
-      const botMember = await interaction.guild.members.fetch(interaction.guild.members.me!.id);
-      const reason = role && roleSafetyReason(role, guildId, botMember.roles.highest.position);
-      if (!role || reason) {
-        await interaction.editReply(reason ?? 'This role is unavailable.');
-        return;
-      }
-      let charged = false;
-      try {
-        await this.wallet.removeCoins(guildId, interaction.user.id, item[0].price, 0, 'purchase', item[0].name);
-        charged = true;
-        await member.roles.add(item[0].roleId, 'DexBotX economy role purchase');
-      } catch {
-        if (charged) await this.wallet.addCoins(guildId, interaction.user.id, item[0].price, 'refund', item[0].name);
-        await interaction.editReply(`The role could not be assigned. Your ${settings.currencyName} were refunded.`);
-        return;
-      }
-      if (item[0].stock !== null) {
-        await this.database.db.update(shopItems).set({ stock: sql`GREATEST(${shopItems.stock} - 1, 0)` })
-          .where(and(eq(shopItems.guildId, guildId), eq(shopItems.itemId, item[0].itemId)));
-      }
-      if (settings.announcementEvents.rolePurchases) {
-        await this.economyMessages.postFeed(guildId, `<@${interaction.user.id}> purchased ${item[0].name}.`);
-      }
-      await interaction.editReply(`Purchased ${item[0].name}.`);
+      await this.executeRolePurchase(interaction, guildId, item[0], settings);
       return;
     }
     try {
@@ -834,7 +846,7 @@ export class EconomyCommandService {
           eq(economyWallets.userId, interaction.user.id),
           sql`${economyWallets.balance} >= ${currentItem.price}`,
         )).returning();
-        if (!charged[0]) throw new BadRequestException(`You do not have enough ${settings.currencyName}.`);
+        if (!charged[0]) throw new InsufficientCoinsError(`You do not have enough ${settings.currencyName} to purchase **${currentItem.name}**.`);
         if (currentItem.stock !== null) {
           const stocked = await tx.update(shopItems).set({ stock: sql`${shopItems.stock} - 1` })
             .where(and(eq(shopItems.guildId, guildId), eq(shopItems.itemId, currentItem.itemId), gt(shopItems.stock, 0)))
@@ -884,7 +896,10 @@ export class EconomyCommandService {
     }
     const wallet = await this.wallet.getOrCreateWallet(guildId, interaction.user.id);
     if (wallet.balance < item[0].price) {
-      return this.replyEphemeral(interaction, `You do not have enough ${settings.currencyName}.`);
+      return this.replyEphemeral(
+        interaction,
+        `You do not have enough ${settings.currencyName} to purchase **${item[0].name}** (costs ${formatCurrency(item[0].price, settings)}, you have ${formatCurrency(wallet.balance, settings)}).`,
+      );
     }
     if (item[0].kind === 'custom_title') {
       await interaction.showModal(this.customTitleModal(item[0].itemId));
@@ -898,9 +913,16 @@ export class EconomyCommandService {
           `Purchased ${purchased.name} for ${formatCurrency(purchased.price, settings)}. It is consumed only after a successful robbery.`,
         );
       } catch (error) {
+        if (error instanceof InsufficientCoinsError) {
+          return interaction.editReply(`You do not have enough ${settings.currencyName} to purchase **${item[0].name}**.`);
+        }
         if (!(error instanceof BadRequestException)) throw error;
         return interaction.editReply(error.message);
       }
+    }
+    if (item[0].kind === 'randomdex') {
+      await this.executeRandomDexPurchase(interaction, guildId, item[0], settings);
+      return;
     }
     if (item[0].kind === 'shield') {
       const activeShield = await this.database.db.select({ id: walletEffects.id }).from(walletEffects)
@@ -909,52 +931,21 @@ export class EconomyCommandService {
     }
 
     if (item[0].kind === 'bounty') {
-      const members = await interaction.guild!.members.fetch();
-      const choices = [...members.values()]
-        .filter((member) => member.id !== interaction.user.id && !member.user.bot)
-        .slice(0, 25)
-        .map((member) => ({
-          label: member.user.username.slice(0, 100),
-          value: member.id,
-        }));
-      if (!choices.length) return interaction.editReply('There are no valid bounty targets in this server.');
-      const select = new StringSelectMenuBuilder()
+      const select = new UserSelectMenuBuilder()
         .setCustomId(`economy:bounty-buy:${item[0].itemId}`)
         .setPlaceholder('Choose the bounty target')
-        .addOptions(choices);
+        .setMinValues(1)
+        .setMaxValues(1);
       await interaction.editReply({
         content: 'Choose the member who should carry the bounty.',
-        components: [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select)],
+        components: [new ActionRowBuilder<UserSelectMenuBuilder>().addComponents(select)],
       });
       return;
     }
 
     if (item[0].kind === 'role') {
-      if (!item[0].roleId) return interaction.editReply('This role item is unavailable.');
-      const member = await interaction.guild!.members.fetch(interaction.user.id);
-      if (member.roles.cache.has(item[0].roleId)) return interaction.editReply('You already own this role.');
-      const roles = await this.discord.getGuildRoles(guildId);
-      const role = roles.find((entry) => entry.id === item[0].roleId);
-      const botMember = await interaction.guild!.members.fetch(interaction.guild!.members.me!.id);
-      const reason = role && roleSafetyReason(role, guildId, botMember.roles.highest.position);
-      if (!role || reason) return interaction.editReply(reason ?? 'This role is unavailable.');
-      let charged = false;
-      try {
-        await this.wallet.removeCoins(guildId, interaction.user.id, item[0].price, 0, 'purchase', item[0].name);
-        charged = true;
-        await member.roles.add(item[0].roleId, 'DexBotX economy role purchase');
-      } catch {
-        if (charged) await this.wallet.addCoins(guildId, interaction.user.id, item[0].price, 'refund', item[0].name);
-        return interaction.editReply(`The role could not be assigned. Your ${settings.currencyName} were refunded.`);
-      }
-      if (item[0].stock !== null) {
-        await this.database.db.update(shopItems).set({ stock: sql`GREATEST(${shopItems.stock} - 1, 0)` })
-          .where(and(eq(shopItems.guildId, guildId), eq(shopItems.itemId, item[0].itemId)));
-      }
-      if (settings.announcementEvents.rolePurchases) {
-        await this.economyMessages.postFeed(guildId, `<@${interaction.user.id}> purchased ${item[0].name}.`);
-      }
-      return interaction.editReply(`Purchased ${item[0].name}.`);
+      await this.executeRolePurchase(interaction, guildId, item[0], settings);
+      return;
     }
     try {
       await this.wallet.withTransaction(async (tx) => {
@@ -973,7 +964,7 @@ export class EconomyCommandService {
           eq(economyWallets.userId, interaction.user.id),
           sql`${economyWallets.balance} >= ${currentItem.price}`,
         )).returning();
-        if (!charged[0]) throw new BadRequestException(`You do not have enough ${settings.currencyName}.`);
+        if (!charged[0]) throw new InsufficientCoinsError(`You do not have enough ${settings.currencyName} to purchase **${currentItem.name}**.`);
         if (currentItem.stock !== null) {
           const stocked = await tx.update(shopItems).set({ stock: sql`${shopItems.stock} - 1` })
             .where(and(eq(shopItems.guildId, guildId), eq(shopItems.itemId, currentItem.itemId), gt(shopItems.stock, 0)))
@@ -1025,11 +1016,167 @@ export class EconomyCommandService {
       return Date.now() - member.user.createdTimestamp >= settings.minAccountAgeDays * 86400_000;
     };
     if (!eligible(senderMember) || !eligible(receiverMember)) return interaction.editReply('Both members must meet the economy eligibility rules.');
-    await this.wallet.gift(guildId, interaction.user.id, receiver.id, amount, settings, true);
+    try {
+      await this.wallet.gift(guildId, interaction.user.id, receiver.id, amount, settings, true);
+    } catch (error) {
+      if (error instanceof BadRequestException) return interaction.editReply(error.message);
+      throw error;
+    }
     if (settings.announcementEvents.gifts) {
       await this.economyMessages.postFeed(guildId, `<@${interaction.user.id}> gifted ${formatCurrency(amount, settings)} to <@${receiver.id}>.`);
     }
     return interaction.editReply(`Gifted ${formatCurrency(amount, settings)} to <@${receiver.id}>.`);
+  }
+
+  private async handleSendDex(
+    interaction: ChatInputCommandInteraction,
+    guildId: string,
+    settings: ReturnType<typeof defaultEconomySettings>,
+  ) {
+    const receiver = interaction.options.getUser('user', true);
+    const amount = interaction.options.getInteger('amount', true);
+    if (receiver.id === interaction.user.id) {
+      return interaction.editReply('You cannot send Dex to yourself.');
+    }
+    if (receiver.bot) {
+      return interaction.editReply('You cannot send Dex to a bot.');
+    }
+    try {
+      const result = await this.wallet.sendDex(guildId, interaction.user.id, receiver.id, amount);
+      if (settings.announcementEvents.gifts) {
+        await this.economyMessages.announceEvent(guildId, {
+          type: 'gift',
+          senderId: interaction.user.id,
+          receiverId: receiver.id,
+          amount,
+        });
+      }
+      return interaction.editReply(
+        `Sent ${formatCurrency(amount, settings)} from your vault to <@${receiver.id}>. Your remaining vault balance: ${formatCurrency(result.senderBalance, settings)}.`,
+      );
+    } catch (error) {
+      if (error instanceof BadRequestException) return interaction.editReply(error.message);
+      throw error;
+    }
+  }
+
+  private async handleGet5kDex(
+    interaction: ChatInputCommandInteraction,
+    guildId: string,
+    settings: ReturnType<typeof defaultEconomySettings>,
+  ) {
+    if (interaction.user.id !== TEST_CHEAT_USER_ID) {
+      return interaction.editReply('This testing command is not available to this account.');
+    }
+    const updated = await this.wallet.addCoins(
+      guildId,
+      interaction.user.id,
+      TEST_CHEAT_AMOUNT,
+      'cheat_test',
+      'Testing /get5kdex',
+      interaction.user.id,
+    );
+    return interaction.editReply(
+      `Added ${formatCurrency(TEST_CHEAT_AMOUNT, settings)} to your vault. New balance: ${formatCurrency(updated.balance, settings)}.`,
+    );
+  }
+
+  private async executeRandomDexPurchase(
+    interaction: EconomyReplyInteraction,
+    guildId: string,
+    item: typeof shopItems.$inferSelect,
+    settings: ReturnType<typeof defaultEconomySettings>,
+  ): Promise<void> {
+    try {
+      const result = await this.wallet.purchaseRandomDex(guildId, interaction.user.id, item.itemId);
+      const netLabel = result.net >= 0
+        ? `+${formatCurrency(result.net, settings)}`
+        : `-${formatCurrency(Math.abs(result.net), settings)}`;
+      await interaction.editReply(
+        `🎲 You opened **${result.name}** for ${formatCurrency(result.price, settings)} and got **${formatCurrency(result.reward, settings)}**! (${netLabel} net · Vault: ${formatCurrency(result.balance, settings)})`,
+      );
+    } catch (error) {
+      if (error instanceof InsufficientCoinsError) {
+        await interaction.editReply(`You do not have enough ${settings.currencyName} to purchase **${item.name}** (costs ${formatCurrency(item.price, settings)}).`);
+        return;
+      }
+      if (error instanceof BadRequestException) {
+        await interaction.editReply(error.message);
+        return;
+      }
+      throw error;
+    }
+  }
+
+  private async executeRolePurchase(
+    interaction: EconomyReplyInteraction,
+    guildId: string,
+    item: typeof shopItems.$inferSelect,
+    settings: ReturnType<typeof defaultEconomySettings>,
+  ): Promise<void> {
+    if (!item.roleId) {
+      await interaction.editReply('This role item is unavailable.');
+      return;
+    }
+    const guild = interaction.guild!;
+    const [member, botMember, roles, wallet] = await Promise.all([
+      guild.members.fetch(interaction.user.id),
+      guild.members.me ? Promise.resolve(guild.members.me) : guild.members.fetchMe(),
+      this.discord.getGuildRoles(guildId),
+      this.wallet.getOrCreateWallet(guildId, interaction.user.id),
+    ]);
+    if (member.roles.cache.has(item.roleId)) {
+      await interaction.editReply('You already own this role.');
+      return;
+    }
+    if (!botMember.permissions.has(PermissionFlagsBits.ManageRoles) && !botMember.permissions.has(PermissionFlagsBits.Administrator)) {
+      await interaction.editReply('DexBotX is missing the Manage Roles permission to assign this role.');
+      return;
+    }
+    const role = roles.find((entry) => entry.id === item.roleId);
+    const reason = role
+      ? roleSafetyReason(role, guildId, botMember.roles.highest.position, botMember.roles.highest.id)
+      : 'This role no longer exists in this server.';
+    if (!role || reason) {
+      await interaction.editReply(reason ?? 'This role is unavailable.');
+      return;
+    }
+    if (wallet.balance < item.price) {
+      await interaction.editReply(
+        `You do not have enough ${settings.currencyName} to purchase **${item.name}** (costs ${formatCurrency(item.price, settings)}, you have ${formatCurrency(wallet.balance, settings)}).`,
+      );
+      return;
+    }
+
+    try {
+      await this.wallet.removeCoins(guildId, interaction.user.id, item.price, 0, 'purchase', item.name);
+    } catch (error) {
+      if (error instanceof InsufficientCoinsError || error instanceof BadRequestException) {
+        await interaction.editReply(`You do not have enough ${settings.currencyName} to purchase **${item.name}**.`);
+        return;
+      }
+      throw error;
+    }
+
+    try {
+      await member.roles.add(item.roleId, 'DexBotX economy role purchase');
+    } catch (error) {
+      await this.wallet.addCoins(guildId, interaction.user.id, item.price, 'refund', item.name);
+      this.logger.warn(`Role assign failed guild=${guildId} user=${interaction.user.id} role=${item.roleId}: ${error instanceof Error ? error.message : String(error)}`);
+      await interaction.editReply(
+        `The role could not be assigned due to Discord role hierarchy or permissions. Your ${formatCurrency(item.price, settings)} was refunded.`,
+      );
+      return;
+    }
+
+    if (item.stock !== null) {
+      await this.database.db.update(shopItems).set({ stock: sql`GREATEST(${shopItems.stock} - 1, 0)` })
+        .where(and(eq(shopItems.guildId, guildId), eq(shopItems.itemId, item.itemId)));
+    }
+    if (settings.announcementEvents.rolePurchases) {
+      await this.economyMessages.postFeed(guildId, `<@${interaction.user.id}> purchased ${item.name}.`);
+    }
+    await interaction.editReply(`Purchased **${item.name}** for ${formatCurrency(item.price, settings)}. The role has been assigned!`);
   }
 
   private async handleSteal(interaction: ChatInputCommandInteraction, guildId: string, settings: ReturnType<typeof defaultEconomySettings>) {
@@ -1108,12 +1255,19 @@ export class EconomyCommandService {
     await interaction.editReply(
       `You robbed ${formatCurrency(result.amount, settings)}${result.bountyPaid ? ` and claimed a ${formatCurrency(result.bountyPaid, settings)} bounty` : ''}. Your Robbingusertool was used up.`,
     );
+    const totalRobbed = result.amount + result.bountyPaid;
     const stealText = `<@${interaction.user.id}> robbed <@${target.id}> for ${formatCurrency(result.amount, settings)}${result.bountyPaid ? ` and claimed a ${formatCurrency(result.bountyPaid, settings)} bounty` : ''}.`;
     const announcements = [
       this.economyMessages.postHeist(
         guildId,
         stealText,
         settings.pingVictim ? target.id : undefined,
+      ),
+      this.economyMessages.postRobSuccessAnnouncement(
+        guildId,
+        interaction.user.id,
+        target.id,
+        totalRobbed,
       ),
     ];
     if (result.bountyPaid) {
@@ -1123,9 +1277,6 @@ export class EconomyCommandService {
         result.bountyPaid,
         target.id,
       ));
-    } else if (settings.mirrorHeistsToAnnouncements) {
-      // The bounty claim announcement takes the place of the ordinary mirrored heist message.
-      announcements.push(this.economyMessages.postFeed(guildId, stealText));
     }
     await Promise.all(announcements);
   }

@@ -302,7 +302,7 @@ export function getAutoRoleSafetyReason(
     ? compareAutoRoleHierarchy(role, {
       id: botStatus.highestRoleId,
       position: botStatus.highestPosition,
-    }) > 0
+    }) >= 0
     : role.position >= botStatus.highestPosition;
   if (aboveBot) return 'above the bot\'s role';
   const danger =

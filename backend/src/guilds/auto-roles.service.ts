@@ -69,15 +69,17 @@ export class AutoRolesService {
   ) {}
 
   async get(guild: GuildRow): Promise<AutoRoleResponse> {
-    const settings = await this.cache.get(guild.id);
+    const [settings, roles] = await Promise.all([
+      this.cache.get(guild.id),
+      this.guildSync.getRoles(guild.id),
+    ]);
     const config = normalizeAutoRoleConfig(settings.autoRoles);
-    const roles = await this.guildSync.getRoles(guild.id);
-    const botStatus = await this.guildSync.getBotStatus(guild.id, roles);
+    const [botStatus, canSendInChannel] = await Promise.all([
+      this.guildSync.getBotStatus(guild.id, roles),
+      config.announce.channelId ? this.canSendInChannel(config.announce.channelId) : Promise.resolve(false),
+    ]);
     const roleView = this.classifyRoles(guild.id, roles, botStatus);
     const selectedId = config.roleIds[0];
-    const canSendInChannel = config.announce.channelId
-      ? await this.canSendInChannel(config.announce.channelId)
-      : false;
     return {
       config,
       roles: roleView,
@@ -158,8 +160,10 @@ export class AutoRolesService {
       }
       await tx.insert(auditLogs).values({ guildId: guild.id, userId: session.userId, action: 'auto_roles.update' });
     });
-    await this.cache.invalidate(guild.id);
-    await this.publishRevision(guild.id, 'settings', 'updated');
+    await Promise.all([
+      this.cache.invalidate(guild.id),
+      this.publishRevision(guild.id, 'settings', 'updated'),
+    ]);
     if (channelToRefresh) {
       void this.refreshChannelAccess(guild.id, channelToRefresh, config.announce.embed.enabled).catch((error: unknown) => {
         this.logger.error(

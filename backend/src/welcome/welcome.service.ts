@@ -85,18 +85,17 @@ export class WelcomeService {
     if (config.enabled && !config.channelId) {
       throw new BadRequestException({ message: 'Validation failed', issues: [{ path: 'channelId', message: 'Choose a channel to post in' }] });
     }
-    if (config.channelId) {
-      const channels = await this.guilds.getChannels(guild.id);
-      if (!channels.some((c) => c.id === config.channelId)) {
-        throw new BadRequestException({
-          message: 'Validation failed',
-          issues: [{ path: 'channelId', message: 'That channel does not exist in this server' }],
-        });
-      }
-    }
-
     this.assertBackgroundOwnership(guild, config);
-    const before = await this.cache.get(guild.id);
+    const [channels, before] = await Promise.all([
+      config.channelId ? this.guilds.getChannels(guild.id) : Promise.resolve(null),
+      this.cache.get(guild.id),
+    ]);
+    if (config.channelId && channels && !channels.some((c) => c.id === config.channelId)) {
+      throw new BadRequestException({
+        message: 'Validation failed',
+        issues: [{ path: 'channelId', message: 'That channel does not exist in this server' }],
+      });
+    }
     const other = kind === 'welcome' ? 'goodbye' : 'welcome';
     const now = new Date();
     await this.database.db.transaction(async (tx) => {

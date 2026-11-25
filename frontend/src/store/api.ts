@@ -237,8 +237,22 @@ export const api = createApi({
       },
       invalidatesTags: (_r, _e, { guildId }) => [{ type: 'Economy', id: `${guildId}:items` }],
     }),
-    createEconomyItem: b.mutation<{ ok: true }, { guildId: string; item: Partial<EconomyItem> }>({
+    createEconomyItem: b.mutation<{ ok: true; item?: EconomyItem }, { guildId: string; item: Partial<EconomyItem> }>({
       query: ({ guildId, item }) => ({ url: `/guilds/${guildId}/economy/items`, method: 'POST', body: item }),
+      async onQueryStarted({ guildId }, { dispatch, queryFulfilled }) {
+        try {
+          const { data } = await queryFulfilled;
+          if (data?.item) {
+            dispatch(api.util.updateQueryData('getEconomyItems', guildId, (draft) => {
+              if (!draft.items.some((entry) => entry.itemId === data.item!.itemId)) {
+                draft.items.push(data.item!);
+              }
+            }));
+          }
+        } catch {
+          // Handled by caller
+        }
+      },
       invalidatesTags: (_r, _e, { guildId }) => [{ type: 'Economy', id: `${guildId}:items` }],
     }),
     reorderEconomyItems: b.mutation<{ ok: true }, { guildId: string; itemIds: string[] }>({

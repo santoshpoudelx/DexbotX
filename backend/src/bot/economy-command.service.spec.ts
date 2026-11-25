@@ -1,9 +1,11 @@
 import { InternalServerErrorException } from '@nestjs/common';
+import { ComponentType } from 'discord.js';
 import type {
   ButtonInteraction,
   ChatInputCommandInteraction,
   ModalSubmitInteraction,
   StringSelectMenuInteraction,
+  UserSelectMenuInteraction,
 } from 'discord.js';
 import type { DatabaseService } from '../db/database.service';
 import { EconomyMessageService } from '../economy/economy-message.service';
@@ -42,6 +44,9 @@ function createService(
     checkRobAttemptPrerequisites: jest.fn().mockResolvedValue('missing_tool'),
     rob: jest.fn().mockResolvedValue({ status: 'missing_tool' }),
     purchaseRobbingTool: jest.fn().mockResolvedValue({ name: 'Robbingusertool', price: 400 }),
+    purchaseRandomDex: jest.fn().mockResolvedValue({ name: 'RandomDex', price: 50, reward: 85, net: 35, balance: 135 }),
+    sendDex: jest.fn().mockResolvedValue({ senderBalance: 4500, receiverBalance: 500 }),
+    removeCoins: jest.fn().mockResolvedValue({ balance: 0 }),
   };
   const database = {
     db: {
@@ -78,6 +83,8 @@ function createService(
     postHeist: jest.fn().mockResolvedValue(undefined),
     postBountyAnnouncement: jest.fn().mockResolvedValue(undefined),
     postBountyClaimAnnouncement: jest.fn().mockResolvedValue(undefined),
+    postRobSuccessAnnouncement: jest.fn().mockResolvedValue(undefined),
+    announceEvent: jest.fn().mockResolvedValue(undefined),
   };
   const discord = { createChannelMessage: jest.fn().mockResolvedValue({ id: '500000000000000001' }) };
   const service = new EconomyCommandService(
@@ -156,8 +163,9 @@ function button(
   return {
     get deferred() { return state.deferred; },
     get replied() { return state.replied; },
+    id: '400000000000000001',
     customId,
-    guild: { id: guildId, ownerId },
+    guild: { id: guildId, ownerId, members: { fetch: jest.fn() } },
     guildId,
     user: { id: userId },
     memberPermissions: { has: jest.fn(() => false) },
@@ -215,6 +223,43 @@ describe('EconomyCommandService interaction guards', () => {
     expect(interaction.deferReply).toHaveBeenCalledTimes(1);
   });
 
+  it('uses a user-select menu for bounty targets instead of fetching all guild members', async () => {
+    const { service, selectResults } = createService();
+    selectResults.push([{
+      itemId: 'bounty-item',
+      kind: 'bounty',
+      name: 'Bounty Poster',
+      price: 50,
+      stock: null,
+      enabled: true,
+    }]);
+    const interaction = button('economy:buy:bounty-item');
+    const fetchMembers = jest.spyOn(interaction.guild!.members, 'fetch');
+
+    await service.handleButton(interaction);
+
+    expect(fetchMembers).not.toHaveBeenCalled();
+    expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: 'Choose the member who should carry the bounty.',
+      components: [expect.objectContaining({
+        components: [expect.objectContaining({
+          data: expect.objectContaining({ type: ComponentType.UserSelect }),
+        })],
+      })],
+    }));
+  });
+
+  it('edits an already-acknowledged component reply instead of failing on duplicate defer', async () => {
+    const { service } = createService(true);
+    const interaction = button('economy:buy:shield');
+    jest.spyOn(interaction, 'deferReply').mockRejectedValue({ code: 40060 });
+
+    await expect(service.handleButton(interaction)).resolves.toBeUndefined();
+
+    expect(interaction.editReply).toHaveBeenCalledWith('The economy is paused.');
+    expect(interaction.reply).not.toHaveBeenCalled();
+  });
+
   it('blocks store select-menu purchases while the economy is disabled', async () => {
     const { service, setup } = createService(false, false);
     const state = { deferred: false };
@@ -224,6 +269,7 @@ describe('EconomyCommandService interaction guards', () => {
       guild: { id: guildId },
       values: ['shield'],
       component: { options: [{ value: 'shield' }] },
+      isStringSelectMenu: jest.fn(() => true),
       deferReply: jest.fn().mockImplementation(async () => { state.deferred = true; }),
       editReply: jest.fn().mockResolvedValue(undefined),
       reply: jest.fn().mockResolvedValue(undefined),
@@ -393,6 +439,7 @@ describe('EconomyCommandService interaction guards', () => {
       values: ['title-item'],
       component: { options: [{ value: 'title-item', emoji: { name: '🏷️' } }] },
       user: { id: ownerId },
+      isStringSelectMenu: jest.fn(() => true),
       deferReply: jest.fn().mockResolvedValue(undefined),
       editReply: jest.fn().mockResolvedValue(undefined),
       reply: jest.fn().mockResolvedValue(undefined),
@@ -417,11 +464,13 @@ describe('EconomyCommandService interaction guards', () => {
         guild: { id: guildId, ownerId },
         values: [targetId],
         user: { id: ownerId },
+        users: { get: jest.fn(() => ({ id: targetId, bot: false })) },
+        isUserSelectMenu: jest.fn(() => true),
         deferReply: jest.fn().mockResolvedValue(undefined),
         editReply: jest.fn().mockResolvedValue(undefined),
         reply: jest.fn().mockResolvedValue(undefined),
         showModal: jest.fn().mockResolvedValue(undefined),
-      } as unknown as StringSelectMenuInteraction;
+      } as unknown as UserSelectMenuInteraction;
 
       await service.handleSelectMenu(interaction);
 
@@ -430,6 +479,29 @@ describe('EconomyCommandService interaction guards', () => {
       expect(setup.get).not.toHaveBeenCalled();
     },
   );
+
+  it('rejects bot users selected as bounty targets', async () => {
+    const { service } = createService();
+    const interaction = {
+      customId: `economy:bounty-buy:bounty-item`,
+      guild: { id: guildId, ownerId },
+      values: [targetId],
+      user: { id: ownerId },
+      users: { get: jest.fn(() => ({ id: targetId, bot: true })) },
+      isUserSelectMenu: jest.fn(() => true),
+      deferReply: jest.fn(),
+      editReply: jest.fn(),
+      reply: jest.fn().mockResolvedValue(undefined),
+      showModal: jest.fn(),
+    } as unknown as UserSelectMenuInteraction;
+
+    await service.handleSelectMenu(interaction);
+
+    expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({
+      content: 'Choose a valid member who is not yourself.',
+    }));
+    expect(interaction.showModal).not.toHaveBeenCalled();
+  });
 
   it.each([
     `economy:bounty-buy-amount:${targetId}`,
@@ -549,6 +621,12 @@ describe('EconomyCommandService interaction guards', () => {
 
     await service.handle(interaction);
 
+    expect(economyMessages.postRobSuccessAnnouncement).toHaveBeenCalledWith(
+      guildId,
+      ownerId,
+      targetId,
+      110,
+    );
     expect(economyMessages.postBountyClaimAnnouncement).toHaveBeenCalledWith(
       guildId,
       ownerId,
@@ -556,6 +634,58 @@ describe('EconomyCommandService interaction guards', () => {
       targetId,
     );
     expect(economyMessages.postFeed).not.toHaveBeenCalled();
+  });
+
+  it('grants 5000 Dex via /get5kdex only to the allowlisted user', async () => {
+    const { service, wallet } = createService();
+    wallet.addCoins.mockResolvedValue({ balance: 5000 } as never);
+    const valid = {
+      ...chatCommand('get5kdex', commandsChannelId, '1459142692356362303'),
+    } as unknown as ChatInputCommandInteraction;
+
+    await service.handle(valid);
+    expect(wallet.addCoins).toHaveBeenCalledWith(
+      guildId,
+      '1459142692356362303',
+      5000,
+      'cheat_test',
+      'Testing /get5kdex',
+      '1459142692356362303',
+    );
+    expect(valid.editReply).toHaveBeenCalledWith(expect.stringContaining('5,000 Dex'));
+
+    const invalid = {
+      ...chatCommand('get5kdex', commandsChannelId),
+      memberPermissions: { has: jest.fn(() => true) },
+    } as unknown as ChatInputCommandInteraction;
+    await service.handle(invalid);
+    expect(invalid.editReply).toHaveBeenCalledWith('This testing command is not available to this account.');
+    expect(wallet.addCoins).toHaveBeenCalledTimes(1);
+  });
+
+  it('sends any vault amount via /senddex', async () => {
+    const { service, wallet } = createService();
+    const interaction = {
+      ...chatCommand('senddex', commandsChannelId),
+      options: {
+        getUser: jest.fn(() => ({ id: targetId, bot: false })),
+        getInteger: jest.fn(() => 500),
+      },
+    } as unknown as ChatInputCommandInteraction;
+
+    await service.handle(interaction);
+    expect(wallet.sendDex).toHaveBeenCalledWith(guildId, ownerId, targetId, 500);
+    expect(interaction.editReply).toHaveBeenCalledWith(expect.stringContaining('Sent 500 Dex'));
+  });
+
+  it('opens RandomDex from store and reports payout', async () => {
+    const { service, wallet, selectResults } = createService();
+    selectResults.push([{ itemId: 'randomdex', kind: 'randomdex', name: 'RandomDex', price: 50, stock: null, enabled: true }]);
+    const interaction = button('economy:buy:randomdex', ownerId);
+
+    await service.handleButton(interaction);
+    expect(wallet.purchaseRandomDex).toHaveBeenCalledWith(guildId, ownerId, 'randomdex');
+    expect(interaction.editReply).toHaveBeenCalledWith(expect.stringContaining('85 Dex'));
   });
 
   it('replies and announces when someone tries to rob this bot', async () => {
