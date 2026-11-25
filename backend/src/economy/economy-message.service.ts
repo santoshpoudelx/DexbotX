@@ -26,11 +26,19 @@ const STORE_ITEM_EMOJI: Record<string, string> = {
   role: '🏅',
 };
 
+function isOldMessageEditLimit(error: unknown): error is DiscordApiError {
+  return error instanceof DiscordApiError
+    && error.status === 429
+    && error.message.toLowerCase().includes('maximum number of edits to messages older than 1 hour reached');
+}
+
 @Injectable()
 export class EconomyMessageService {
   private readonly logger = new Logger(EconomyMessageService.name);
   private readonly feedQueues = new Map<string, Promise<void>>();
   private readonly feedQueueLengths = new Map<string, number>();
+  private readonly syncTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly syncInflight = new Map<string, Promise<void>>();
 
   constructor(
     private readonly database: DatabaseService,
@@ -46,12 +54,69 @@ export class EconomyMessageService {
     return { row, settings: parsed?.success ? parsed.data : defaultEconomySettings() };
   }
 
+  private async editOrReplaceMessage(
+    channelId: string,
+    messageId: string,
+    payload: Record<string, unknown>,
+  ): Promise<{ messageId: string; supersededMessageId?: string }> {
+    try {
+      await this.discord.editChannelMessage(channelId, messageId, payload);
+      return { messageId };
+    } catch (error) {
+      const missing = error instanceof DiscordApiError && error.status === 404;
+      if (!missing && !isOldMessageEditLimit(error)) throw error;
+
+      if (!missing) {
+        this.logger.warn(`Discord edit limit reached for economy message ${messageId} in channel ${channelId}; creating a replacement.`);
+      }
+      const replacement = await this.discord.createChannelMessage(channelId, payload);
+      return {
+        messageId: replacement.id,
+        ...(missing ? {} : { supersededMessageId: messageId }),
+      };
+    }
+  }
+
+  private async deleteSupersededMessage(channelId: string, messageId: string): Promise<void> {
+    try {
+      await this.discord.deleteChannelMessage(channelId, messageId);
+    } catch (error) {
+      this.logger.warn(`Could not delete superseded economy message ${messageId} in channel ${channelId}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  scheduleStoreAndRulesSync(guildId: string, guildName: string): void {
+    const existingTimer = this.syncTimers.get(guildId);
+    if (existingTimer) clearTimeout(existingTimer);
+    const timer = setTimeout(() => {
+      this.syncTimers.delete(guildId);
+      const prev = this.syncInflight.get(guildId) ?? Promise.resolve();
+      const next = prev
+        .catch(() => undefined)
+        .then(async () => {
+          await this.updateStore(guildId);
+          await this.updateRules(guildId, guildName);
+        })
+        .catch((error: unknown) => {
+          this.logger.warn(`Debounced store/rules sync failed guild=${guildId}: ${error instanceof Error ? error.message : String(error)}`);
+        })
+        .finally(() => {
+          if (this.syncInflight.get(guildId) === next) this.syncInflight.delete(guildId);
+        });
+      this.syncInflight.set(guildId, next);
+    }, 300);
+    timer.unref();
+    this.syncTimers.set(guildId, timer);
+  }
+
   async postFeed(guildId: string, text: string) {
     const { row } = await this.settings(guildId);
     if (!row?.enabled || row.paused) return;
     const channelId = row.announcementsChannelId;
     if (!channelId) return;
-    await this.enqueueDiscordPost(channelId, { content: text.slice(0, 2000) });
+    await this.enqueueDiscordPost(channelId, { content: text.slice(0, 2000) }).catch((error: unknown) => {
+      this.logger.warn(`Economy feed post failed guild=${guildId}: ${error instanceof Error ? error.message : String(error)}`);
+    });
   }
 
   async postBountyAnnouncement(guildId: string, amount: number, targetUserId: string) {
@@ -62,6 +127,8 @@ export class EconomyMessageService {
     await this.enqueueDiscordPost(channelId, {
       content: `${formatCurrency(amount, settings)} bounty has been set on <@${targetUserId}>.`,
       allowed_mentions: { parse: [] },
+    }).catch((error: unknown) => {
+      this.logger.warn(`Bounty announcement failed guild=${guildId}: ${error instanceof Error ? error.message : String(error)}`);
     });
   }
 
@@ -78,6 +145,8 @@ export class EconomyMessageService {
     await this.enqueueDiscordPost(channelId, {
       content: `<@${robberUserId}> claimed ${formatCurrency(amount, settings)} by robbing <@${targetUserId}>.`,
       allowed_mentions: { parse: [] },
+    }).catch((error: unknown) => {
+      this.logger.warn(`Bounty claim announcement failed guild=${guildId}: ${error instanceof Error ? error.message : String(error)}`);
     });
   }
 
@@ -88,7 +157,9 @@ export class EconomyMessageService {
     if (!channelId) return;
     await this.enqueueDiscordPost(channelId, victimUserId
       ? { content: text.slice(0, 2000), allowed_mentions: { parse: [], users: [victimUserId] } }
-      : { content: text.slice(0, 2000) });
+      : { content: text.slice(0, 2000) }).catch((error: unknown) => {
+      this.logger.warn(`Heist announcement failed guild=${guildId}: ${error instanceof Error ? error.message : String(error)}`);
+    });
   }
 
   private enqueueDiscordPost(channelId: string, payload: Record<string, unknown>) {
@@ -151,23 +222,28 @@ export class EconomyMessageService {
     const changed = row.rulesHash !== hash;
 
     const ids = [...(row.rulesMessageIds ?? [])];
+    const supersededMessages: string[] = [];
+    if (!changed && ids.length === embeds.length && ids.every((id) => typeof id === 'string' && id.length > 0)) {
+      return;
+    }
     for (let index = 0; index < embeds.length; index++) {
       const payload = { embeds: [embeds[index]] };
       if (ids[index]) {
-        try {
-          await this.discord.getChannelMessage(row.rulesChannelId, ids[index]);
-          if (changed) await this.discord.editChannelMessage(row.rulesChannelId, ids[index], payload);
-          continue;
-        } catch {
-          await this.discord.deleteChannelMessage(row.rulesChannelId, ids[index]).catch(() => undefined);
-          ids[index] = '';
+        const result = await this.editOrReplaceMessage(row.rulesChannelId, ids[index], payload);
+        ids[index] = result.messageId;
+        if (result.supersededMessageId) {
+          supersededMessages.push(result.supersededMessageId);
         }
+        continue;
       }
       const created = await this.discord.createChannelMessage(row.rulesChannelId, payload);
       ids[index] = created.id;
     }
     await this.database.db.update(economySettings).set({ rulesMessageIds: ids, rulesHash: hash })
       .where(eq(economySettings.guildId, guildId));
+    for (const messageId of supersededMessages) {
+      await this.deleteSupersededMessage(row.rulesChannelId, messageId);
+    }
   }
 
   async updateStore(guildId: string) {
@@ -194,11 +270,11 @@ export class EconomyMessageService {
           type: 1,
           components: category.items.slice(index, index + 5).map((item) => ({
             type: 2,
-            style: item.kind === 'rob_tool' ? 1 : 2,
+            style: item.kind === 'rob_tool' ? 1 : item.kind === 'role' ? 3 : 2,
             label: item.name.slice(0, 80),
             emoji: { name: STORE_ITEM_EMOJI[item.kind] ?? '📦' },
             custom_id: `economy:buy:${item.itemId}`,
-            disabled: false,
+            disabled: item.stock !== null && item.stock <= 0,
           })),
         });
       }
@@ -228,7 +304,8 @@ export class EconomyMessageService {
       if (!categoryItems.length) return null;
       const value = categoryItems.map((item) => {
         const detail = item.description.length > 90 ? `${item.description.slice(0, 87)}...` : item.description;
-        return `${STORE_ITEM_EMOJI[item.kind] ?? '📦'} **${item.name.slice(0, 80)}** — \`${formatCurrency(item.price, settings)}\`${detail ? `\n${detail}` : ''}`;
+        const stockText = item.stock === null ? '' : item.stock <= 0 ? ' · *Out of stock*' : ` · *${item.stock} left*`;
+        return `${STORE_ITEM_EMOJI[item.kind] ?? '📦'} **${item.name.slice(0, 80)}** — \`${formatCurrency(item.price, settings)}\`${stockText}${detail ? `\n${detail}` : ''}`;
       }).join('\n\n');
       return { name: category.name, value: value.slice(0, 1024), inline: false };
     }).filter((field) => field !== null);
@@ -254,13 +331,14 @@ export class EconomyMessageService {
       components,
     };
     if (row.storeMessageId) {
-      try {
-        await this.discord.getChannelMessage(row.storeChannelId, row.storeMessageId);
-        await this.discord.editChannelMessage(row.storeChannelId, row.storeMessageId, payload);
-        return;
-      } catch {
-        await this.discord.deleteChannelMessage(row.storeChannelId, row.storeMessageId).catch(() => undefined);
+      const result = await this.editOrReplaceMessage(row.storeChannelId, row.storeMessageId, payload);
+      if (result.messageId === row.storeMessageId) return;
+      await this.database.db.update(economySettings).set({ storeMessageId: result.messageId })
+        .where(eq(economySettings.guildId, guildId));
+      if (result.supersededMessageId) {
+        await this.deleteSupersededMessage(row.storeChannelId, result.supersededMessageId);
       }
+      return;
     }
     const created = await this.discord.createChannelMessage(row.storeChannelId, payload);
     await this.database.db.update(economySettings).set({ storeMessageId: created.id })
@@ -285,11 +363,10 @@ export class EconomyMessageService {
     await this.redis.client.set(cacheKey, hash, 'EX', 3600);
     if (row.leaderboardMessageId) {
       try {
-        await this.discord.getChannelMessage(row.leaderboardChannelId, row.leaderboardMessageId);
         await this.discord.editChannelMessage(row.leaderboardChannelId, row.leaderboardMessageId, payload);
         return;
-      } catch {
-        await this.discord.deleteChannelMessage(row.leaderboardChannelId, row.leaderboardMessageId).catch(() => undefined);
+      } catch (error) {
+        if (error instanceof DiscordApiError && error.status !== 404) throw error;
       }
     }
     const created = await this.discord.createChannelMessage(row.leaderboardChannelId, payload);
@@ -303,11 +380,10 @@ export class EconomyMessageService {
     const content = `Rob any time with /robuser. A Robbingusertool from /shop costs 400 ${settings.currencyName}, allows one successful robbery of up to ${formatCurrency(200, settings)}, and is consumed only after a successful robbery.`;
     if (row.countdownMessageId) {
       try {
-        await this.discord.getChannelMessage(row.announcementsChannelId, row.countdownMessageId);
         await this.discord.editChannelMessage(row.announcementsChannelId, row.countdownMessageId, { content });
         return;
-      } catch {
-        await this.discord.deleteChannelMessage(row.announcementsChannelId, row.countdownMessageId).catch(() => undefined);
+      } catch (error) {
+        if (error instanceof DiscordApiError && error.status !== 404) throw error;
       }
     }
     const created = await this.discord.createChannelMessage(row.announcementsChannelId, { content });

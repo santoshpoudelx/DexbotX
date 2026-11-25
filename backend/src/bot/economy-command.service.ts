@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { BadRequestException, Injectable, Logger } from '@nestjs/common';
-import { and, desc, eq, sql } from 'drizzle-orm';
+import { BadRequestException, Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
+import { and, desc, eq, gt, sql } from 'drizzle-orm';
 import {
   MessageFlags,
   PermissionFlagsBits,
@@ -198,6 +198,7 @@ export class EconomyCommandService {
         after: { userId },
       });
       await interaction.editReply(`Reset <@${userId}>’s economy wallet.`);
+      return;
     }
     if (interaction.customId === 'economy:balance') {
       await this.handleBalance(interaction as unknown as ChatInputCommandInteraction, interaction.guildId ?? interaction.guild!.id);
@@ -391,7 +392,11 @@ export class EconomyCommandService {
       await interaction.editReply(`Enter a whole number between ${formatCurrency(settings.bountyMin, settings)} and ${formatCurrency(settings.bountyMax, settings)}.`);
       return;
     }
+    let placed = false;
     await this.database.db.transaction(async (tx) => {
+      const existing = await tx.select({ id: economyBounties.id }).from(economyBounties)
+        .where(and(eq(economyBounties.guildId, interaction.guild!.id), eq(economyBounties.targetId, targetId), eq(economyBounties.status, 'active'))).limit(1);
+      if (existing[0]) throw new BadRequestException('There is already an active bounty on that target.');
       await this.wallet.getOrCreateWallet(interaction.guild!.id, interaction.user.id);
       await tx.select().from(economyWallets)
         .where(and(eq(economyWallets.guildId, interaction.guild!.id), eq(economyWallets.userId, interaction.user.id)))
@@ -419,7 +424,12 @@ export class EconomyCommandService {
         amount,
         otherUserId: targetId,
       });
+    }).then(() => {
+      placed = true;
+    }).catch(async (error) => {
+      await interaction.editReply(error instanceof BadRequestException ? error.message : 'Could not place the bounty.');
     });
+    if (!placed) return;
     await interaction.editReply(`Held ${formatCurrency(amount, settings)} as a bounty on <@${targetId}>.`);
     await this.economyMessages.postBountyAnnouncement(interaction.guild.id, amount, targetId);
   }
@@ -444,8 +454,13 @@ export class EconomyCommandService {
     }
     const sub = interaction.options.getSubcommand();
     if (sub === 'on') {
-      const result = await this.setup.enable(guildId, interaction.guild!.name, interaction.user.id, 'command');
-      return interaction.editReply(result.message);
+      try {
+        const result = await this.setup.enable(guildId, interaction.guild!.name, interaction.user.id, 'command');
+        return interaction.editReply(result.message);
+      } catch (error) {
+        if (!(error instanceof InternalServerErrorException)) throw error;
+        return interaction.editReply(error.message);
+      }
     }
     if (sub === 'off') {
       await this.setup.disable(guildId, interaction.user.id, 'command');
@@ -580,6 +595,16 @@ export class EconomyCommandService {
       await interaction.editReply('Your daily reward was claimed, but its public announcement failed. Please contact a server administrator.');
       return;
     }
+    if (
+      settings.announcementEvents.streakMilestones
+      && result.streakDay >= 3
+      && (result.streakDay === settings.streakCapDays || result.streakDay % 7 === 0)
+    ) {
+      await this.economyMessages.postFeed(
+        guildId,
+        `<@${interaction.user.id}> reached a ${result.streakDay}-day daily streak!`,
+      );
+    }
     this.cancelEphemeralReplyDeletion(interaction);
     await interaction.deleteReply().catch((error: unknown) => {
       this.logger.warn(`Could not clear private daily reward acknowledgement guild=${guildId}: ${error instanceof Error ? error.message : String(error)}`);
@@ -611,7 +636,19 @@ export class EconomyCommandService {
       .where(and(eq(shopItems.guildId, guildId), eq(shopItems.enabled, true))).orderBy(shopItems.sortOrder);
     if (!items.length) return interaction.editReply('The economy store is empty.');
     const settings = (await this.setup.get(guildId))?.settings ?? defaultEconomySettings();
-    return interaction.editReply(items.map((item) => `**${item.name}** — ${formatCurrency(item.price, settings)}`).join('\n'));
+    const lines = items.map((item) => {
+      const stockLabel = item.stock !== null ? ` (${item.stock} left)` : '';
+      const desc = item.description ? ` — ${item.description}` : '';
+      return `**${item.name}** — \`${formatCurrency(item.price, settings)}\`${stockLabel}${desc}`;
+    });
+    return interaction.editReply({
+      embeds: [{
+        title: `${settings.economyName} | Store`,
+        description: lines.join('\n').slice(0, 4096),
+        color: 0x5865f2,
+        footer: { text: 'Use /buy <item> or the store channel buttons to purchase.' },
+      }],
+    });
   }
 
   private async handleStorePurchase(
@@ -627,6 +664,10 @@ export class EconomyCommandService {
       .where(and(eq(shopItems.guildId, guildId), eq(shopItems.itemId, itemId), eq(shopItems.enabled, true))).limit(1);
     if (!item[0]) {
       await this.replyEphemeral(interaction, 'That item is not available.');
+      return;
+    }
+    if (item[0].stock !== null && item[0].stock <= 0) {
+      await this.replyEphemeral(interaction, 'That item is out of stock.');
       return;
     }
     const settings = (await this.setup.get(guildId))?.settings ?? defaultEconomySettings();
@@ -728,32 +769,59 @@ export class EconomyCommandService {
       await interaction.editReply(`Purchased ${item[0].name}.`);
       return;
     }
-    const wallet = await this.wallet.getOrCreateWallet(guildId, interaction.user.id);
-    if (wallet.balance < item[0].price) {
-      await interaction.editReply(`You do not have enough ${settings.currencyName}.`);
-      return;
-    }
-    await this.wallet.removeCoins(guildId, interaction.user.id, item[0].price, 0, 'purchase', item[0].name);
-    if (item[0].stock !== null) {
-      await this.database.db.update(shopItems).set({ stock: sql`GREATEST(${shopItems.stock} - 1, 0)` })
-        .where(and(eq(shopItems.guildId, guildId), eq(shopItems.itemId, item[0].itemId)));
-    }
-    if (['shield', 'rob_more', 'lockpick', 'decoy'].includes(item[0].kind)) {
-      await this.database.db.insert(walletEffects).values({
-        guildId,
-        userId: interaction.user.id,
-        type: item[0].kind,
-        remainingWindows: item[0].kind === 'shield' ? 2 : 1,
-      }).onConflictDoNothing();
-    }
-    if (item[0].kind === 'daily_boost') {
-      await this.database.db.insert(walletEffects).values({
-        guildId,
-        userId: interaction.user.id,
-        type: 'daily_boost',
-        remainingWindows: 0,
-        expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+    try {
+      await this.wallet.withTransaction(async (tx) => {
+        const locked = await tx.select().from(shopItems)
+          .where(and(eq(shopItems.guildId, guildId), eq(shopItems.itemId, item[0].itemId), eq(shopItems.enabled, true)))
+          .for('update').limit(1);
+        const currentItem = locked[0];
+        if (!currentItem) throw new BadRequestException('That item is not available.');
+        if (currentItem.stock !== null && currentItem.stock <= 0) throw new BadRequestException('That item is out of stock.');
+        await tx.insert(economyWallets).values({ guildId, userId: interaction.user.id, balance: 0 }).onConflictDoNothing();
+        const charged = await tx.update(economyWallets).set({
+          balance: sql`${economyWallets.balance} - ${currentItem.price}`,
+          updatedAt: new Date(),
+        }).where(and(
+          eq(economyWallets.guildId, guildId),
+          eq(economyWallets.userId, interaction.user.id),
+          sql`${economyWallets.balance} >= ${currentItem.price}`,
+        )).returning();
+        if (!charged[0]) throw new BadRequestException(`You do not have enough ${settings.currencyName}.`);
+        if (currentItem.stock !== null) {
+          const stocked = await tx.update(shopItems).set({ stock: sql`${shopItems.stock} - 1` })
+            .where(and(eq(shopItems.guildId, guildId), eq(shopItems.itemId, currentItem.itemId), gt(shopItems.stock, 0)))
+            .returning({ id: shopItems.id });
+          if (!stocked[0]) throw new BadRequestException('That item is out of stock.');
+        }
+        await tx.insert(economyTransactions).values({
+          guildId, userId: interaction.user.id, type: 'purchase', amount: currentItem.price, note: currentItem.name,
+        });
+        if (['shield', 'rob_more', 'lockpick', 'decoy'].includes(currentItem.kind)) {
+          await tx.insert(walletEffects).values({
+            guildId,
+            userId: interaction.user.id,
+            type: currentItem.kind,
+            remainingWindows: currentItem.kind === 'shield' ? 2 : 1,
+          }).onConflictDoNothing();
+        }
+        if (currentItem.kind === 'daily_boost') {
+          await tx.insert(walletEffects).values({
+            guildId,
+            userId: interaction.user.id,
+            type: 'daily_boost',
+            remainingWindows: 0,
+            expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+          });
+        }
+        await tx.insert(economyAuditLog).values({
+          guildId, actorId: interaction.user.id, source: 'command', action: 'economy.item.purchase',
+          after: { itemId: currentItem.itemId },
+        });
       });
+    } catch (error) {
+      if (!(error instanceof BadRequestException)) throw error;
+      await interaction.editReply(error.message);
+      return;
     }
     await interaction.editReply(`Purchased ${item[0].name}.`);
   }
@@ -850,32 +918,59 @@ export class EconomyCommandService {
       }
       return interaction.editReply(`Purchased ${item[0].name}.`);
     }
-    await this.wallet.removeCoins(guildId, interaction.user.id, item[0].price, 0, 'purchase', item[0].name);
-    if (item[0].stock !== null) {
-      await this.database.db.update(shopItems).set({ stock: sql`GREATEST(${shopItems.stock} - 1, 0)` })
-        .where(and(eq(shopItems.guildId, guildId), eq(shopItems.itemId, item[0].itemId)));
-    }
-    if (['shield', 'rob_more', 'lockpick', 'decoy'].includes(item[0].kind)) {
-      await this.database.db.insert(walletEffects).values({
-        guildId,
-        userId: interaction.user.id,
-        type: item[0].kind,
-        remainingWindows: item[0].kind === 'shield' ? 2 : 1,
-      }).onConflictDoNothing();
-    }
-    if (item[0].kind === 'daily_boost') {
-      await this.database.db.insert(walletEffects).values({
-        guildId,
-        userId: interaction.user.id,
-        type: 'daily_boost',
-        remainingWindows: 0,
-        expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+    try {
+      await this.wallet.withTransaction(async (tx) => {
+        const locked = await tx.select().from(shopItems)
+          .where(and(eq(shopItems.guildId, guildId), eq(shopItems.itemId, item[0].itemId), eq(shopItems.enabled, true)))
+          .for('update').limit(1);
+        const currentItem = locked[0];
+        if (!currentItem) throw new BadRequestException('That item is not available.');
+        if (currentItem.stock !== null && currentItem.stock <= 0) throw new BadRequestException('That item is out of stock.');
+        await tx.insert(economyWallets).values({ guildId, userId: interaction.user.id, balance: 0 }).onConflictDoNothing();
+        const charged = await tx.update(economyWallets).set({
+          balance: sql`${economyWallets.balance} - ${currentItem.price}`,
+          updatedAt: new Date(),
+        }).where(and(
+          eq(economyWallets.guildId, guildId),
+          eq(economyWallets.userId, interaction.user.id),
+          sql`${economyWallets.balance} >= ${currentItem.price}`,
+        )).returning();
+        if (!charged[0]) throw new BadRequestException(`You do not have enough ${settings.currencyName}.`);
+        if (currentItem.stock !== null) {
+          const stocked = await tx.update(shopItems).set({ stock: sql`${shopItems.stock} - 1` })
+            .where(and(eq(shopItems.guildId, guildId), eq(shopItems.itemId, currentItem.itemId), gt(shopItems.stock, 0)))
+            .returning({ id: shopItems.id });
+          if (!stocked[0]) throw new BadRequestException('That item is out of stock.');
+        }
+        await tx.insert(economyTransactions).values({
+          guildId, userId: interaction.user.id, type: 'purchase', amount: currentItem.price, note: currentItem.name,
+        });
+        if (['shield', 'rob_more', 'lockpick', 'decoy'].includes(currentItem.kind)) {
+          await tx.insert(walletEffects).values({
+            guildId,
+            userId: interaction.user.id,
+            type: currentItem.kind,
+            remainingWindows: currentItem.kind === 'shield' ? 2 : 1,
+          }).onConflictDoNothing();
+        }
+        if (currentItem.kind === 'daily_boost') {
+          await tx.insert(walletEffects).values({
+            guildId,
+            userId: interaction.user.id,
+            type: 'daily_boost',
+            remainingWindows: 0,
+            expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+          });
+        }
+        await tx.insert(economyAuditLog).values({
+          guildId, actorId: interaction.user.id, source: 'command', action: 'economy.item.purchase',
+          after: { itemId: currentItem.itemId },
+        });
       });
+    } catch (error) {
+      if (!(error instanceof BadRequestException)) throw error;
+      return interaction.editReply(error.message);
     }
-    await this.database.db.insert(economyAuditLog).values({
-      guildId, actorId: interaction.user.id, source: 'command', action: 'economy.item.purchase',
-      after: { itemId: item[0].itemId },
-    });
     return interaction.editReply(`Purchased ${item[0].name}.`);
   }
 
@@ -883,8 +978,10 @@ export class EconomyCommandService {
     const receiver = interaction.options.getUser('user', true);
     const amount = interaction.options.getInteger('amount', true);
     if (receiver.bot) return interaction.editReply('You cannot gift Dex to a bot.');
-    const senderMember = await interaction.guild!.members.fetch(interaction.user.id);
-    const receiverMember = await interaction.guild!.members.fetch(receiver.id);
+    const [senderMember, receiverMember] = await Promise.all([
+      interaction.guild!.members.fetch(interaction.user.id),
+      interaction.guild!.members.fetch(receiver.id),
+    ]);
     const eligible = (member: typeof senderMember) => {
       if (member.joinedTimestamp && Date.now() - member.joinedTimestamp < settings.minServerHours * 3600_000) return false;
       return Date.now() - member.user.createdTimestamp >= settings.minAccountAgeDays * 86400_000;
@@ -918,8 +1015,10 @@ export class EconomyCommandService {
       return;
     }
 
-    const thiefMember = await interaction.guild!.members.fetch(interaction.user.id).catch(() => null);
-    const victimMember = await interaction.guild!.members.fetch(target.id).catch(() => null);
+    const [thiefMember, victimMember] = await Promise.all([
+      interaction.guild!.members.fetch(interaction.user.id).catch(() => null),
+      interaction.guild!.members.fetch(target.id).catch(() => null),
+    ]);
     if (!thiefMember || !victimMember) {
       await interaction.editReply(GENERIC_ROB_REFUSAL);
       return;
@@ -988,7 +1087,7 @@ export class EconomyCommandService {
       ));
     } else if (settings.mirrorHeistsToAnnouncements) {
       // The bounty claim announcement takes the place of the ordinary mirrored heist message.
-      await this.economyMessages.postFeed(guildId, stealText);
+      announcements.push(this.economyMessages.postFeed(guildId, stealText));
     }
     await Promise.all(announcements);
   }

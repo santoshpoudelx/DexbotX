@@ -50,8 +50,6 @@
       "when": 1795260000000,
       "tag": "0006_auto_roles_defaults",
       "breakpoints": true
-<<<<<<< Updated upstream
-=======
     },
     {
       "idx": 7,
@@ -94,7 +92,6 @@
       "when": 1795542000000,
       "tag": "0012_store_catalog_copy",
       "breakpoints": true
->>>>>>> Stashed changes
     }
   ]
 }

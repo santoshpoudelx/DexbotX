@@ -95,7 +95,7 @@ export const api = createApi({
     getRoles: b.query<GuildRole[], string>({
       query: (guildId) => `/guilds/${guildId}/roles`,
       transformResponse: (r: { roles: GuildRole[] }) => r.roles,
-      keepUnusedDataFor: 60,
+      keepUnusedDataFor: 600,
       providesTags: (_r, _e, guildId) => [{ type: 'Roles', id: guildId }],
     }),
     refreshGuild: b.mutation<GuildRefreshResult, string>({
@@ -180,14 +180,32 @@ export const api = createApi({
     }),
     disableEconomy: b.mutation<{ ok: true }, string>({
       query: (guildId) => ({ url: `/guilds/${guildId}/economy/disable`, method: 'POST' }),
+      async onQueryStarted(guildId, { dispatch, queryFulfilled }) {
+        const patch = dispatch(api.util.updateQueryData('getEconomy', guildId, (draft) => {
+          draft.state.enabled = false;
+        }));
+        try { await queryFulfilled; } catch { patch.undo(); }
+      },
       invalidatesTags: (_r, _e, guildId) => [{ type: 'Economy', id: guildId }],
     }),
     pauseEconomy: b.mutation<{ ok: true }, string>({
       query: (guildId) => ({ url: `/guilds/${guildId}/economy/pause`, method: 'POST' }),
+      async onQueryStarted(guildId, { dispatch, queryFulfilled }) {
+        const patch = dispatch(api.util.updateQueryData('getEconomy', guildId, (draft) => {
+          draft.state.paused = true;
+        }));
+        try { await queryFulfilled; } catch { patch.undo(); }
+      },
       invalidatesTags: (_r, _e, guildId) => [{ type: 'Economy', id: guildId }],
     }),
     resumeEconomy: b.mutation<{ ok: true }, string>({
       query: (guildId) => ({ url: `/guilds/${guildId}/economy/resume`, method: 'POST' }),
+      async onQueryStarted(guildId, { dispatch, queryFulfilled }) {
+        const patch = dispatch(api.util.updateQueryData('getEconomy', guildId, (draft) => {
+          draft.state.paused = false;
+        }));
+        try { await queryFulfilled; } catch { patch.undo(); }
+      },
       invalidatesTags: (_r, _e, guildId) => [{ type: 'Economy', id: guildId }],
     }),
     updateEconomySettings: b.mutation<{ settings: EconomySettings }, { guildId: string; settings: EconomySettings }>({
@@ -200,10 +218,23 @@ export const api = createApi({
     }),
     updateEconomyItem: b.mutation<{ ok: true }, { guildId: string; itemId: string; item: Partial<EconomyItem> }>({
       query: ({ guildId, itemId, item }) => ({ url: `/guilds/${guildId}/economy/items/${itemId}`, method: 'PUT', body: item }),
+      async onQueryStarted({ guildId, itemId, item }, { dispatch, queryFulfilled }) {
+        const patch = dispatch(api.util.updateQueryData('getEconomyItems', guildId, (draft) => {
+          const target = draft.items.find((entry) => entry.itemId === itemId);
+          if (target) Object.assign(target, item);
+        }));
+        try { await queryFulfilled; } catch { patch.undo(); }
+      },
       invalidatesTags: (_r, _e, { guildId }) => [{ type: 'Economy', id: `${guildId}:items` }],
     }),
     deleteEconomyItem: b.mutation<{ ok: true }, { guildId: string; itemId: string }>({
       query: ({ guildId, itemId }) => ({ url: `/guilds/${guildId}/economy/items/${itemId}`, method: 'DELETE' }),
+      async onQueryStarted({ guildId, itemId }, { dispatch, queryFulfilled }) {
+        const patch = dispatch(api.util.updateQueryData('getEconomyItems', guildId, (draft) => {
+          draft.items = draft.items.filter((entry) => entry.itemId !== itemId);
+        }));
+        try { await queryFulfilled; } catch { patch.undo(); }
+      },
       invalidatesTags: (_r, _e, { guildId }) => [{ type: 'Economy', id: `${guildId}:items` }],
     }),
     createEconomyItem: b.mutation<{ ok: true }, { guildId: string; item: Partial<EconomyItem> }>({
@@ -216,6 +247,7 @@ export const api = createApi({
     }),
     getEconomyRoles: b.query<{ roles: EconomySafeRole[] }, string>({
       query: (guildId) => `/guilds/${guildId}/economy/roles`,
+      providesTags: (_r, _e, guildId) => [{ type: 'Roles', id: guildId }],
     }),
     deleteEconomyChannels: b.mutation<{ ok: true }, string>({
       query: (guildId) => ({ url: `/guilds/${guildId}/economy/delete-channels`, method: 'POST', body: { confirm: true } }),
@@ -242,7 +274,7 @@ export function useGetGuildsQuery(arg?: void, options?: QueryOptions) {
 }
 
 export function useGetGuildQuery(guildId: string, options?: QueryOptions) {
-  return getGuildQuery(guildId, { ...options, refetchOnMountOrArgChange: 60 });
+  return getGuildQuery(guildId, { ...options, refetchOnMountOrArgChange: 300 });
 }
 
 export function useGetChannelsQuery(guildId: string, options?: QueryOptions) {

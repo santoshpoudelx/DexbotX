@@ -82,9 +82,14 @@ export interface DiscordRole {
   tags?: Record<string, unknown>;
 }
 
+const ROLES_CACHE_TTL_SECONDS = 300;
+const MEMBER_CACHE_TTL_SECONDS = 60;
+const GUILD_BOT_CACHE_TTL_SECONDS = 120;
+
 @Injectable()
 export class DiscordRestService {
   private readonly logger = new Logger(DiscordRestService.name);
+  private readonly inflight = new Map<string, Promise<unknown>>();
 
   constructor(
     @Inject(APP_CONFIG) private readonly config: AppConfig,
@@ -92,7 +97,17 @@ export class DiscordRestService {
     private readonly redis: RedisService,
   ) {}
 
-  private async request<T>(path: string, init: RequestInit): Promise<T> {
+  private coalesce<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    const existing = this.inflight.get(key) as Promise<T> | undefined;
+    if (existing) return existing;
+    const promise = fn().finally(() => {
+      if (this.inflight.get(key) === promise) this.inflight.delete(key);
+    });
+    this.inflight.set(key, promise);
+    return promise;
+  }
+
+  private async request<T>(path: string, init: RequestInit, attempt = 0): Promise<T> {
     if (!path.startsWith('/') || path.startsWith('//')) {
       throw new Error('Invalid Discord API path');
     }
@@ -101,7 +116,8 @@ export class DiscordRestService {
       throw new Error('Invalid Discord API path');
     }
 
-    await this.stats.recordDiscordRestCall((init.method ?? 'GET').toUpperCase(), normalizeRoute(path));
+    const method = (init.method ?? 'GET').toUpperCase();
+    await this.stats.recordDiscordRestCall(method, normalizeRoute(path));
     const res = await fetch(url, {
       ...init,
       headers: { 'User-Agent': USER_AGENT, ...(init.headers ?? {}) },
@@ -163,6 +179,19 @@ export class DiscordRestService {
       }
       const discordCode = typeof errorBody?.code === 'number' ? errorBody.code : undefined;
       const message = typeof errorBody?.message === 'string' ? errorBody.message : `Discord API error ${res.status}`;
+      const oldMessageEditLimit = res.status === 429
+        && message.toLowerCase().includes('maximum number of edits to messages older than 1 hour reached');
+      if (!oldMessageEditLimit
+        && res.status === 429
+        && retryAfter !== undefined
+        && retryAfter <= 3
+        && attempt < 2
+        && (method === 'GET' || method === 'PUT' || method === 'PATCH' || method === 'POST')) {
+        const waitMs = Math.max(250, Math.ceil(retryAfter * 1000) + 100);
+        this.logger.warn(`Discord 429 on ${method} ${normalizeRoute(path)}; retrying in ${waitMs}ms (attempt ${attempt + 1})`);
+        await new Promise((resolve) => setTimeout(resolve, waitMs));
+        return this.request<T>(path, init, attempt + 1);
+      }
       throw new DiscordApiError(res.status, discordCode, message, retryAfter);
     }
     return body as T;
@@ -229,28 +258,30 @@ export class DiscordRestService {
     const cached = await this.redis.client.get(key);
     if (cached) return JSON.parse(cached) as DiscordChannel[];
 
-    const [blockedUntil, routeBlockedUntil] = await Promise.all([
-      this.redis.client.get('discord:blocked_until'),
-      this.redis.client.get(`discord:blocked:channels:${guildId}`),
-    ]);
-    const now = Date.now();
-    const blocked = Math.max(Number(blockedUntil ?? 0), Number(routeBlockedUntil ?? 0));
-    if (blocked > now) {
-      throw new DiscordApiError(
-        429,
-        undefined,
-        'Discord is temporarily rate limited and no cached channels are available.',
-        Math.ceil((blocked - now) / 1000),
-      );
-    }
+    return this.coalesce(key, async () => {
+      const [blockedUntil, routeBlockedUntil] = await Promise.all([
+        this.redis.client.get('discord:blocked_until'),
+        this.redis.client.get(`discord:blocked:channels:${guildId}`),
+      ]);
+      const now = Date.now();
+      const blocked = Math.max(Number(blockedUntil ?? 0), Number(routeBlockedUntil ?? 0));
+      if (blocked > now) {
+        throw new DiscordApiError(
+          429,
+          undefined,
+          'Discord is temporarily rate limited and no cached channels are available.',
+          Math.ceil((blocked - now) / 1000),
+        );
+      }
 
-    const channels = await this.request<DiscordChannel[]>(`/guilds/${guildId}/channels`, { headers: this.bot() });
-    try {
-      await this.redis.client.set(key, JSON.stringify(channels), 'EX', 60 * 60);
-    } catch (error) {
-      this.logger.warn(`Discord channel cache write failed: ${error instanceof Error ? error.message : String(error)}`);
-    }
-    return channels;
+      const channels = await this.request<DiscordChannel[]>(`/guilds/${guildId}/channels`, { headers: this.bot() });
+      try {
+        await this.redis.client.set(key, JSON.stringify(channels), 'EX', 60 * 60);
+      } catch (error) {
+        this.logger.warn(`Discord channel cache write failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      return channels;
+    });
   }
 
   async canBotPost(channelId: string, includeEmbed = false): Promise<boolean> {
@@ -308,28 +339,46 @@ export class DiscordRestService {
     await this.request<void>(`/users/@me/guilds/${guildId}`, { method: 'DELETE', headers: this.bot() });
   }
 
-  getGuildRoles(guildId: string): Promise<DiscordRole[]> {
-    return this.request<DiscordRole[]>(`/guilds/${guildId}/roles`, { headers: this.bot() });
-  }
-
-  createRole(guildId: string, name: string, permissions: string, color = 0): Promise<DiscordRole> {
-    return this.request<DiscordRole>(`/guilds/${guildId}/roles`, {
-      method: 'POST',
-      headers: { ...this.bot(), 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, permissions, color, mentionable: false, hoist: false }),
+  async getGuildRoles(guildId: string): Promise<DiscordRole[]> {
+    const key = `discord:cache:roles:${guildId}`;
+    const cached = await this.redis.client.get(key).catch(() => null);
+    if (cached) return JSON.parse(cached) as DiscordRole[];
+    return this.coalesce(key, async () => {
+      const roles = await this.request<DiscordRole[]>(`/guilds/${guildId}/roles`, { headers: this.bot() });
+      await this.redis.client.set(key, JSON.stringify(roles), 'EX', ROLES_CACHE_TTL_SECONDS).catch(() => undefined);
+      return roles;
     });
   }
 
-  modifyRole(guildId: string, roleId: string, body: { hoist: boolean }): Promise<DiscordRole> {
-    return this.request<DiscordRole>(`/guilds/${guildId}/roles/${roleId}`, {
+  async createRole(guildId: string, name: string, permissions: string, color = 0, hoist = false): Promise<DiscordRole> {
+    const role = await this.request<DiscordRole>(`/guilds/${guildId}/roles`, {
+      method: 'POST',
+      headers: { ...this.bot(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, permissions, color, mentionable: false, hoist }),
+    });
+    await this.redis.client.del(`discord:cache:roles:${guildId}`).catch(() => undefined);
+    return role;
+  }
+
+  async modifyRole(guildId: string, roleId: string, body: { hoist: boolean }): Promise<DiscordRole> {
+    const role = await this.request<DiscordRole>(`/guilds/${guildId}/roles/${roleId}`, {
       method: 'PATCH',
       headers: { ...this.bot(), 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
+    await this.redis.client.del(`discord:cache:roles:${guildId}`).catch(() => undefined);
+    return role;
   }
 
-  getGuildMember(guildId: string, userId: string): Promise<{ roles: string[] }> {
-    return this.request<{ roles: string[] }>(`/guilds/${guildId}/members/${userId}`, { headers: this.bot() });
+  async getGuildMember(guildId: string, userId: string): Promise<{ roles: string[] }> {
+    const key = `discord:cache:member:${guildId}:${userId}`;
+    const cached = await this.redis.client.get(key).catch(() => null);
+    if (cached) return JSON.parse(cached) as { roles: string[] };
+    return this.coalesce(key, async () => {
+      const member = await this.request<{ roles: string[] }>(`/guilds/${guildId}/members/${userId}`, { headers: this.bot() });
+      await this.redis.client.set(key, JSON.stringify(member), 'EX', MEMBER_CACHE_TTL_SECONDS).catch(() => undefined);
+      return member;
+    });
   }
 
   async addMemberRole(guildId: string, userId: string, roleId: string, reason?: string): Promise<void> {
@@ -337,6 +386,7 @@ export class DiscordRestService {
       method: 'PUT',
       headers: { ...this.bot(), ...(reason ? { 'X-Audit-Log-Reason': encodeURIComponent(reason) } : {}) },
     });
+    await this.redis.client.del(`discord:cache:member:${guildId}:${userId}`).catch(() => undefined);
   }
 
   async setChannelOverwrite(channelId: string, targetId: string, allow: string): Promise<void> {
@@ -348,8 +398,15 @@ export class DiscordRestService {
   }
 
   /** Succeeds only if the bot is in the guild; Discord returns 404/403 otherwise. */
-  getGuildAsBot(guildId: string): Promise<DiscordGuild> {
-    return this.request<DiscordGuild>(`/guilds/${guildId}?with_counts=true`, { headers: this.bot() });
+  async getGuildAsBot(guildId: string): Promise<DiscordGuild> {
+    const key = `discord:cache:guild-bot:${guildId}`;
+    const cached = await this.redis.client.get(key).catch(() => null);
+    if (cached) return JSON.parse(cached) as DiscordGuild;
+    return this.coalesce(key, async () => {
+      const guild = await this.request<DiscordGuild>(`/guilds/${guildId}?with_counts=true`, { headers: this.bot() });
+      await this.redis.client.set(key, JSON.stringify(guild), 'EX', GUILD_BOT_CACHE_TTL_SECONDS).catch(() => undefined);
+      return guild;
+    });
   }
 
   async createDmChannel(userId: string): Promise<{ id: string }> {
@@ -361,11 +418,13 @@ export class DiscordRestService {
   }
 
   async createGuildChannel(guildId: string, body: Record<string, unknown>): Promise<DiscordChannel> {
-    return this.request<DiscordChannel>(`/guilds/${guildId}/channels`, {
+    const created = await this.request<DiscordChannel>(`/guilds/${guildId}/channels`, {
       method: 'POST',
       headers: { ...this.bot(), 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
+    await this.redis.client.del(`discord:cache:channels:${guildId}`).catch(() => undefined);
+    return created;
   }
 
   async editGuildChannel(channelId: string, body: Record<string, unknown>): Promise<DiscordChannel> {

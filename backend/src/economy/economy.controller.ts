@@ -95,11 +95,7 @@ export class EconomyController {
     @Req() req: AuthedRequest,
     @Body(new ZodValidationPipe(economySettingsSchema)) settings: EconomySettings,
   ) {
-    await this.setup.updateSettings(guildId, settings, req.session!.userId);
-    await this.messages.updateRules(guildId, req.guild!.name);
-    await this.messages.updateStore(guildId);
-    await this.messages.refreshLeaderboard(guildId);
-    await this.messages.updateRobbingInfo(guildId);
+    await this.setup.updateSettings(guildId, settings, req.session!.userId, req.guild!.name);
     return { settings };
   }
 
@@ -137,8 +133,8 @@ export class EconomyController {
       guildId, actorId: req.session!.userId, source: 'dashboard', action: 'economy.item.create',
       after: body as unknown as Record<string, unknown>,
     });
-    await this.messages.updateStore(guildId);
-    await this.messages.updateRules(guildId, req.guild!.name);
+    this.messages.scheduleStoreAndRulesSync(guildId, req.guild!.name);
+    await this.setup.invalidateCache(guildId);
     return { ok: true };
   }
 
@@ -161,8 +157,8 @@ export class EconomyController {
       guildId, actorId: req.session!.userId, source: 'dashboard', action: 'economy.item.update',
       after: body as unknown as Record<string, unknown>,
     });
-    await this.messages.updateStore(guildId);
-    await this.messages.updateRules(guildId, req.guild!.name);
+    this.messages.scheduleStoreAndRulesSync(guildId, req.guild!.name);
+    await this.setup.invalidateCache(guildId);
     return { ok: true };
   }
 
@@ -186,8 +182,8 @@ export class EconomyController {
       guildId, actorId: req.session!.userId, source: 'dashboard', action: 'economy.items.reorder',
       after: { itemIds: body.itemIds },
     });
-    await this.messages.updateStore(guildId);
-    await this.messages.updateRules(guildId, req.guild!.name);
+    this.messages.scheduleStoreAndRulesSync(guildId, req.guild!.name);
+    await this.setup.invalidateCache(guildId);
     return { ok: true };
   }
 
@@ -198,8 +194,8 @@ export class EconomyController {
       guildId, actorId: req.session!.userId, source: 'dashboard', action: 'economy.item.delete',
       after: { itemId },
     });
-    await this.messages.updateStore(guildId);
-    await this.messages.updateRules(guildId, req.guild!.name);
+    this.messages.scheduleStoreAndRulesSync(guildId, req.guild!.name);
+    await this.setup.invalidateCache(guildId);
     return { ok: true };
   }
 
@@ -227,7 +223,7 @@ export class EconomyController {
     const rows = await this.database.db.select().from(economySettings).where(eq(economySettings.guildId, guildId)).limit(1);
     const row = rows[0];
     if (!row) return { ok: true };
-    for (const id of [row.rulesChannelId, row.commandsChannelId, row.leaderboardChannelId, row.storeChannelId, row.heistLogChannelId, row.announcementsChannelId]) {
+    for (const id of [row.rulesChannelId, row.commandsChannelId, row.leaderboardChannelId, row.storeChannelId, row.heistLogChannelId, row.announcementsChannelId, row.categoryId]) {
       if (id) await this.discord.deleteGuildChannel(id).catch(() => undefined);
     }
     await this.database.db.update(economySettings).set({
@@ -243,6 +239,7 @@ export class EconomyController {
     await this.database.db.insert(economyAuditLog).values({
       guildId, actorId: req.session!.userId, source: 'dashboard', action: 'economy.channels.delete',
     });
+    await this.setup.invalidateCache(guildId);
     return { ok: true };
   }
 }

@@ -27,12 +27,17 @@ import {
   useUpdateEconomyItemMutation,
 } from '@/store/api';
 
-function Section({ icon: Icon, title, children }: { icon: LucideIcon; title: string; children: React.ReactNode }) {
+function Section({ icon: Icon, title, description, children }: { icon: LucideIcon; title: string; description?: string; children: React.ReactNode }) {
   return (
     <Card className="p-5">
-      <div className="mb-4 flex items-center gap-2">
-        <Icon className="size-4 text-primary" aria-hidden="true" />
-        <h2 className="font-medium">{title}</h2>
+      <div className="mb-4 flex items-start justify-between gap-4">
+        <div>
+          <div className="flex items-center gap-2">
+            <Icon className="size-4 text-primary" aria-hidden="true" />
+            <h2 className="font-medium">{title}</h2>
+          </div>
+          {description && <p className="mt-0.5 text-sm text-muted-foreground">{description}</p>}
+        </div>
       </div>
       {children}
     </Card>
@@ -424,7 +429,7 @@ function EconomyEditor({
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 pb-24">
       <PageHeader
         title="Economy"
         description="Manage the economy and set Dex prices for purchasable server roles."
@@ -689,18 +694,14 @@ function EconomyEditor({
       )}
 
       <div className="pointer-events-none fixed inset-x-0 bottom-4 z-20 flex justify-center px-4" aria-live="polite">
-<<<<<<< Updated upstream
         <div
-          className={cn('pointer-events-auto flex items-center gap-3 rounded-2xl border border-border bg-card/95 px-4 py-2.5 shadow-2xl backdrop-blur transition-all', hasUnsavedChanges ? 'translate-y-0 opacity-100' : 'pointer-events-none translate-y-4 opacity-0')}
+          className={cn(
+            'pointer-events-auto flex items-center gap-3 rounded-2xl border border-border bg-card/95 px-4 py-2.5 shadow-2xl backdrop-blur transition-all',
+            hasUnsavedChanges ? 'translate-y-0 opacity-100' : 'pointer-events-none translate-y-4 opacity-0',
+          )}
           aria-hidden={!hasUnsavedChanges}
           inert={!hasUnsavedChanges}
         >
-=======
-        <div className={cn(
-          'pointer-events-auto flex flex-wrap items-center justify-center gap-3 rounded-2xl border border-border bg-card/95 px-4 py-2.5 shadow-2xl backdrop-blur transition-all',
-          hasUnsavedChanges ? 'translate-y-0 opacity-100' : 'pointer-events-none translate-y-4 opacity-0',
-        )} aria-hidden={!hasUnsavedChanges} inert={!hasUnsavedChanges}>
->>>>>>> Stashed changes
           <span className="text-sm">Unsaved changes</span>
           <Button
             type="button"
@@ -725,11 +726,7 @@ function EconomyEditor({
           <Button type="submit" form="economy-role-items-form" size="sm" disabled={savingChanges}>
             <Save aria-hidden="true" /> {savingChanges ? 'Saving…' : 'Save changes'}
           </Button>
-<<<<<<< Updated upstream
         </div>
-=======
-          </div>
->>>>>>> Stashed changes
       </div>
     </div>
   );

@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { AlertTriangle, Hash, RotateCcw, Save, Send, ShieldCheck, TriangleAlert } from 'lucide-react';
 import { toast } from 'sonner';
 import { EditorSkeleton } from '@/components/dashboard/loading-skeleton';
-import { PageHeader } from '@/components/dashboard/ui';
+import { PageHeader, StatusPill } from '@/components/dashboard/ui';
 import { Button } from '@/components/ui/button';
 import { Input, Select, Textarea } from '@/components/ui/input';
 import { ColorField } from '@/components/editor/color-field';
@@ -260,7 +260,7 @@ export default function AutoRolesPage() {
         description="Give new members a role automatically with adaptive timing."
         right={
           <>
-            <Badge tone={draft.enabled ? 'success' : 'neutral'}>{draft.enabled ? 'Enabled' : 'Disabled'}</Badge>
+            <StatusPill on={draft.enabled} />
             <Switch aria-label="Enable Auto Roles" checked={draft.enabled} onCheckedChange={(enabled) => patch({ enabled })} />
           </>
         }

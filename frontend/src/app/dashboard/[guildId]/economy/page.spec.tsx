@@ -160,6 +160,11 @@ describe('EconomyPage', () => {
     expect(screen.getByRole('button', { name: 'Save changes' })).toBeTruthy();
     expect(mocks.disable).not.toHaveBeenCalled();
 
+    const saveBar = screen.getByText('Unsaved changes').parentElement;
+    expect(saveBar?.classList.contains('items-center')).toBe(true);
+    expect(saveBar?.classList.contains('flex-wrap')).toBe(false);
+    expect(saveBar?.classList.contains('justify-center')).toBe(false);
+
     fireEvent.click(screen.getByRole('button', { name: 'Discard' }));
     expect(enabledSwitch.getAttribute('aria-checked')).toBe('true');
     expect(screen.queryByRole('button', { name: 'Save changes' })).toBeNull();

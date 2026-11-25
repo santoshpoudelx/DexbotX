@@ -10,10 +10,10 @@ export const ECONOMY_PROXY_TIMEOUT_MS = 60_000;
 
 function proxyTimeoutMs(apiPath: string, method: string): number | null {
   if (apiPath === 'events/guilds') return null;
-  if (apiPath.includes('/economy/') && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
+  if ((apiPath.includes('/economy/') || apiPath.endsWith('/refresh')) && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
     return ECONOMY_PROXY_TIMEOUT_MS;
   }
-  return 15_000;
+  return 30_000;
 }
 
 function getBackendUrl(): URL {

@@ -20,7 +20,7 @@ interface Connection {
 interface GuildEvent {
   type: string;
   guildId: string;
-  kind?: 'channels' | 'roles' | 'installed' | 'settings';
+  kind?: 'channels' | 'roles' | 'installed' | 'settings' | 'economy';
   rev?: number;
 }
 
@@ -188,11 +188,21 @@ function handleSocketMessage(connection: Connection, raw: unknown): void {
   if (!isGuildEvent(event) || event.guildId !== connection.guildId) return;
 
   if (event.type === 'joined' && typeof event.rev === 'number') {
-    acceptChannelRevision(connection, event.rev);
+    const currentRevision = channelRevisions.get(connection.guildId);
+    if (currentRevision === undefined) {
+      channelRevisions.set(connection.guildId, event.rev);
+    } else if (event.rev > currentRevision) {
+      acceptChannelRevision(connection, event.rev);
+    }
   } else if (event.kind === 'channels' && typeof event.rev === 'number') {
     acceptChannelRevision(connection, event.rev);
   } else if (event.kind === 'settings') {
     connection.dispatch(api.util.invalidateTags([{ type: 'Guild', id: connection.guildId }]));
+  } else if (event.kind === 'economy') {
+    connection.dispatch(api.util.invalidateTags([
+      { type: 'Economy', id: connection.guildId },
+      { type: 'Economy', id: `${connection.guildId}:items` },
+    ]));
   }
 }
 
@@ -238,5 +248,6 @@ function isGuildEvent(value: unknown): value is GuildEvent {
       || event.kind === 'roles'
       || event.kind === 'installed'
       || event.kind === 'settings'
+      || event.kind === 'economy'
     );
 }

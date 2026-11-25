@@ -91,7 +91,8 @@ The public API status endpoint is `GET /dexbotx/health` (also supports `HEAD`). 
 | `npm run lint` | Lint backend source |
 | `npm run typecheck` | TypeScript checks |
 | `npm test` | Unit tests |
-| `npm run test:e2e` | End-to-end tests |
+| `npm run test:e2e` | API end-to-end tests |
+| `npm run economy:test` | Docker-backed economy integration tests |
 | `npm run build` | Build production files |
 | `npm run db:generate` | Generate a migration after changing the Drizzle schema |
 | `npm run db:migrate` | Apply migrations |

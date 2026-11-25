@@ -28,7 +28,7 @@ type ClientSocket = WebSocket & {
 interface GuildEvent {
   type: string;
   guildId: string;
-  kind: 'channels' | 'roles' | 'installed' | 'settings';
+  kind: 'channels' | 'roles' | 'installed' | 'settings' | 'economy';
   data: Record<string, string>;
   rev: number;
 }

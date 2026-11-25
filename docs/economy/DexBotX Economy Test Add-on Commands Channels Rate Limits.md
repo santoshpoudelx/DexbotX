@@ -30,7 +30,7 @@ PART G: Slash commands in Discord, and admin-only pause
 7. Update the design doc (sections 7 and 14), the rules and help text, MANUAL_TEST.md and the dashboard text so they all say pause is for Administrators.
 
 PART H: Category and channels: reuse, create only what is missing, store IDs
-1. Lookup order for the category and for each of the 6 channels (economy-rules, economy-commands, leaderboard, store, heist-log, economy-announcements), on /economy on, dashboard enable and the repair check:
+1. Lookup order for the category and for each of the 6 channels (economy-announcements, economy-rules, leaderboard, economy-commands, store, heist-log), on /economy on, dashboard enable and the repair check:
    a. Use the stored ID if that channel still exists in the guild.
    b. If the stored ID is missing or deleted, look inside the Economy category (also found by stored ID first, then by exact name) for a channel of the right type with the expected name and adopt it, saving its ID.
    c. Only if nothing is found, create it. Never create a second copy. Never adopt a channel outside the Economy category.

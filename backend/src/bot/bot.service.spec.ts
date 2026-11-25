@@ -41,6 +41,8 @@ function makeHarness() {
     {} as never,
     { client: redisClient } as never,
     {} as never,
+    {} as never,
+    {} as never,
   );
   const event = (pending: boolean) => ({
     id: '900000000000000003',

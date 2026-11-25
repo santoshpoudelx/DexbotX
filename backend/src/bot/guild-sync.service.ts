@@ -531,7 +531,7 @@ export class GuildSyncService {
   }
 
   private async invalidateRoles(guildId: string): Promise<void> {
-    await this.redis.client.del(guildRolesCacheKey(guildId));
+    await this.redis.client.del(guildRolesCacheKey(guildId), `discord:cache:roles:${guildId}`);
     await this.redis.client.publish(GUILD_ROLES_CHANGED_CHANNEL, guildId);
   }
 

@@ -24,7 +24,7 @@ Reset state:
 
 Read [TEST_REPORT.md](./TEST_REPORT.md) for results and known limitations.
 
-Current behavior checks: economy channels are public, regular member messages are blocked, and slash commands work only in `economy-commands`. Successful daily claims are announced persistently in that channel; private economy interaction replies expire after 60 seconds. Currency is fixed to Dex. The dashboard manages custom purchasable roles only; it does not expose currency, eligibility thresholds, or built-in item editing. Robberies are available anytime and legacy steal-window rows are cleanup-only.
+Current behavior checks: economy channels are public and ordered `economy-announcements`, `economy-rules`, `leaderboard`, `economy-commands`, `store`, `heist-log`. Category permissions allow @everyone to view, read history, send messages, use application commands, and add reactions; `economy-commands` and `store` inherit them, while the other four channels allow only viewing and reading history. Economy slash-command handling remains restricted to `economy-commands`. Successful daily claims are announced persistently there; private economy interaction replies expire after 60 seconds. Currency is fixed to Dex. The dashboard manages custom purchasable roles only; it does not expose currency, eligibility thresholds, or built-in item editing. Robberies are available anytime and legacy steal-window rows are cleanup-only.
 Before you start:
 - Docker Desktop (or Docker Engine) must be installed and running.
 - Docker tests prove the rules, limits and race conditions. They cannot prove real Discord behaviour (permission overwrites, rate limits, button rendering, pins). The manual checklist this prompt creates covers that, so run both.
@@ -66,7 +66,7 @@ PART 2: Automated scenarios
 These are integration tests that call the real services and command handlers against the Docker database. For every scenario assert the exact result, that no balance is ever below zero, and that every balance change has a transactions row.
 
 Setup
-1. /economy on by staff: category and 6 public channels created in the right order, regular member messages blocked, slash commands restricted to economy-commands, default store seeded with 11 items, and rules embeds posted. Run it again: nothing duplicated. Delete a channel and a message, run again: only those are recreated. Run as a non-staff user: refused. Run with the bot missing a permission: nothing created and the missing permission is listed. Migration coverage verifies legacy floors are raised to 50, default Rob More rows are disabled, and custom rows are preserved.
+1. /economy on by staff: category and 6 public channels created in the requested order with the category and per-channel @everyone permissions, default store seeded with 11 items, and rules embeds posted. Run it again: nothing duplicated, channel order and permissions are repaired. Delete a channel and a message, run again: only those are recreated. Run as a non-staff user: refused. Run with the bot missing a permission: nothing created and the missing permission is listed. Migration coverage verifies legacy floors are raised to 50, default Rob More rows are disabled, and custom rows are preserved.
 
 Daily reward
 2. alice claims twice in one day: second refused. Claims Sunday to Saturday pay 50, 55, 60, 65, 70, 75, 80. Skip a day: back to 50. A new week starts at 50 again. 20 simultaneous /reward calls for bob: exactly one succeeds. A successful claim posts a persistent public announcement with the amount and streak. newbie is refused with the eligibility message.
@@ -94,7 +94,7 @@ Leaderboard
 
 Safety and admin
 17. /economy pause blocks every member command and button but not staff commands. /economy give, take and reset are logged with the staff ID. Commands outside economy-commands are refused privately with a link.
-17a. A regular member cannot send messages in any economy channel or run an application command outside economy-commands. Private economy interaction replies expire after 60 seconds; persistent bot messages and reward announcements remain.
+17a. A regular member can send messages, use application commands, and add reactions in `economy-commands` and `store`; the other four channels are read-only. Economy slash commands outside `economy-commands` are refused privately. Private economy interaction replies expire after 60 seconds; persistent bot messages and reward announcements remain.
 18. For every message the economy sent during all tests, assert it cannot ping @everyone, @here, a role or an unintended user.
 19. At the end of each scenario, total Dex in wallets equals the sum of all transactions. Robbery and gifting never create or destroy Dex.
 20. 100 parallel mixed calls (/reward, /buy, /gift, /robuser): no negative balance, no duplicate rewards, no duplicate transfers, and no repeated consumption of one tool.

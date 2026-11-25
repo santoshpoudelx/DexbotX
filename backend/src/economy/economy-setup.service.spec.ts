@@ -1,4 +1,4 @@
-import { PermissionFlagsBits } from 'discord.js';
+import { PermissionFlagsBits, PermissionsBitField } from 'discord.js';
 import type { DatabaseService } from '../db/database.service';
 import type { DiscordRestService } from '../discord/discord-rest.service';
 import type { RedisService } from '../redis/redis.service';
@@ -12,15 +12,15 @@ const guildId = '100000000000000001';
 const botId = '900000000000000001';
 const categoryId = '300000000000000001';
 const channelDefs = [
+  ['announcementsChannelId', 'economy-announcements'],
   ['rulesChannelId', 'economy-rules'],
-  ['commandsChannelId', 'economy-commands'],
   ['leaderboardChannelId', 'leaderboard'],
+  ['commandsChannelId', 'economy-commands'],
   ['storeChannelId', 'store'],
   ['heistLogChannelId', 'heist-log'],
-  ['announcementsChannelId', 'economy-announcements'],
 ] as const;
 
-function createHarness(existing?: Record<string, unknown>) {
+function createHarness(existing?: Record<string, unknown>, selectError?: Error) {
   const channelIds = channelDefs.map((_, index) => `40000000000000000${index + 1}`);
   let createdChannelIndex = 0;
   const existingChannels = existing ? [
@@ -52,17 +52,20 @@ function createHarness(existing?: Record<string, unknown>) {
   });
   const database = {
     db: {
-      select: jest.fn(() => ({
-        from: jest.fn((table: unknown) => ({
-          where: jest.fn(() => {
-            const rows = table === economySettings && existing ? [existing] : [];
-            return {
-              limit: jest.fn().mockResolvedValue(rows),
-              orderBy: jest.fn(() => orderedRows),
-            };
-          }),
-        })),
-      })),
+      select: jest.fn(() => {
+        if (selectError) throw selectError;
+        return {
+          from: jest.fn((table: unknown) => ({
+            where: jest.fn(() => {
+              const rows = table === economySettings && existing ? [existing] : [];
+              return {
+                limit: jest.fn().mockResolvedValue(rows),
+                orderBy: jest.fn(() => orderedRows),
+              };
+            }),
+          })),
+        };
+      }),
       insert: jest.fn(() => ({
         values: jest.fn(() => ({
           onConflictDoNothing: jest.fn().mockResolvedValue([]),
@@ -74,7 +77,14 @@ function createHarness(existing?: Record<string, unknown>) {
       })),
     },
   };
-  const redis = { client: { set: jest.fn().mockResolvedValue('OK'), del: jest.fn().mockResolvedValue(1) } };
+  const redis = {
+    client: {
+      set: jest.fn().mockResolvedValue('OK'),
+      del: jest.fn().mockResolvedValue(1),
+      incr: jest.fn().mockResolvedValue(1),
+      publish: jest.fn().mockResolvedValue(1),
+    },
+  };
   const messages = {
     updateRules: jest.fn().mockResolvedValue(undefined),
     updateStore: jest.fn().mockResolvedValue(undefined),
@@ -89,7 +99,7 @@ function createHarness(existing?: Record<string, unknown>) {
     windows as unknown as EconomyWindowService,
     messages as unknown as EconomyMessageService,
   );
-  return { service, discord, channelIds };
+  return { service, discord, channelIds, redis };
 }
 
 describe('EconomySetupService channel permissions', () => {
@@ -104,7 +114,18 @@ describe('EconomySetupService channel permissions', () => {
     else process.env.DISCORD_CLIENT_ID = previousBotId;
   });
 
-  it('creates public channels, allows slash commands only in economy-commands, and blocks member text', async () => {
+  it('surfaces database setup failures and releases the setup lock', async () => {
+    const { service, redis } = createHarness(undefined, new Error('economy_settings table missing'));
+
+    await expect(service.enable(guildId, 'Test server', botId, 'dashboard'))
+      .rejects.toMatchObject({
+        status: 500,
+        message: 'Economy setup failed. Verify database migrations are applied and try again.',
+      });
+    expect(redis.client.del).toHaveBeenCalledWith(`guild:${guildId}:economy-setup-lock`);
+  });
+
+  it('creates channels in the requested order with explicit everyone permissions', async () => {
     const { service, discord } = createHarness();
 
     const result = await service.enable(guildId, 'Test server', botId, 'dashboard');
@@ -114,31 +135,49 @@ describe('EconomySetupService channel permissions', () => {
     const calls = discord.createGuildChannel.mock.calls as unknown as Array<[string, {
       name?: string;
       type?: number;
+      position?: number;
       permission_overwrites?: Array<{ id: string; type: number; allow: string; deny: string }>;
     }]>;
     const view = PermissionFlagsBits.ViewChannel;
+    const history = PermissionFlagsBits.ReadMessageHistory;
     const send = PermissionFlagsBits.SendMessages;
     const appCommands = PermissionFlagsBits.UseApplicationCommands;
+    const reactions = PermissionFlagsBits.AddReactions;
+    const memberAllow = view | history | send | appCommands | reactions;
+    const readOnlyAllow = view | history;
 
     const category = calls.find(([, body]) => body.type === 4)?.[1];
-    expect(BigInt(category!.permission_overwrites!.find((overwrite) => overwrite.id === guildId)!.allow) & view).toBe(view);
+    const categoryEveryone = category!.permission_overwrites!.find((overwrite) => overwrite.id === guildId)!;
+    expect(BigInt(categoryEveryone.allow)).toBe(memberAllow);
+    expect(BigInt(categoryEveryone.deny)).toBe(PermissionsBitField.All & ~memberAllow);
 
-    for (const [, body] of calls.filter(([, item]) => item.type === 0)) {
+    const channels = calls.filter(([, item]) => item.type === 0);
+    expect(channels.map(([, body]) => body.name)).toEqual([
+      'economy-announcements',
+      'economy-rules',
+      'leaderboard',
+      'economy-commands',
+      'store',
+      'heist-log',
+    ]);
+
+    for (const [index, [, body]] of channels.entries()) {
       const everyone = body.permission_overwrites!.find((overwrite) => overwrite.id === guildId)!;
       const bot = body.permission_overwrites!.find((overwrite) => overwrite.id === botId)!;
-      expect(BigInt(everyone.allow) & view).toBe(view);
-      expect(BigInt(everyone.deny) & send).toBe(send);
+      const readOnly = ['economy-announcements', 'economy-rules', 'leaderboard', 'heist-log'].includes(body.name!);
+      const expectedAllow = readOnly ? readOnlyAllow : memberAllow;
+      expect(body.position).toBe(index);
+      expect(BigInt(everyone.allow)).toBe(expectedAllow);
+      expect(BigInt(everyone.deny)).toBe(PermissionsBitField.All & ~expectedAllow);
       expect(BigInt(bot.allow) & send).toBe(send);
-      if (body.name === 'economy-commands') {
-        expect(BigInt(everyone.allow) & appCommands).toBe(appCommands);
-        expect(BigInt(everyone.deny) & appCommands).toBe(0n);
-      } else {
-        expect(BigInt(everyone.deny) & appCommands).toBe(appCommands);
+      expect(BigInt(bot.allow) & history).toBe(history);
+      if (body.name === 'economy-commands' || body.name === 'store') {
+        expect(body.permission_overwrites).toEqual(category!.permission_overwrites);
       }
     }
   });
 
-  it('repairs visibility and command restrictions on existing economy channels', async () => {
+  it('repairs permissions, names, and order on existing economy channels', async () => {
     const existing = {
       guildId,
       enabled: false,
@@ -160,5 +199,36 @@ describe('EconomySetupService channel permissions', () => {
     expect(result.ok).toBe(true);
     expect(discord.createGuildChannel).not.toHaveBeenCalled();
     expect(discord.editGuildChannel).toHaveBeenCalledTimes(7);
+    const edits = discord.editGuildChannel.mock.calls as unknown as Array<[string, {
+      name?: string;
+      parent_id?: string;
+      position?: number;
+      permission_overwrites?: Array<{ id: string; type: number; allow: string; deny: string }>;
+    }]>;
+    expect(edits.slice(1).map(([, body]) => body.name)).toEqual([
+      'economy-announcements',
+      'economy-rules',
+      'leaderboard',
+      'economy-commands',
+      'store',
+      'heist-log',
+    ]);
+    expect(edits.slice(1).map(([, body]) => body.position)).toEqual([0, 1, 2, 3, 4, 5]);
+    expect(edits.slice(1).every(([, body]) => body.parent_id === categoryId)).toBe(true);
+
+    const memberAllow = PermissionFlagsBits.ViewChannel
+      | PermissionFlagsBits.ReadMessageHistory
+      | PermissionFlagsBits.SendMessages
+      | PermissionFlagsBits.UseApplicationCommands
+      | PermissionFlagsBits.AddReactions;
+    const readOnlyAllow = PermissionFlagsBits.ViewChannel | PermissionFlagsBits.ReadMessageHistory;
+    for (const [, body] of edits) {
+      const everyone = body.permission_overwrites!.find((overwrite) => overwrite.id === guildId)!;
+      const expectedAllow = ['economy-announcements', 'economy-rules', 'leaderboard', 'heist-log'].includes(body.name!)
+        ? readOnlyAllow
+        : memberAllow;
+      expect(BigInt(everyone.allow)).toBe(expectedAllow);
+      expect(BigInt(everyone.deny)).toBe(PermissionsBitField.All & ~expectedAllow);
+    }
   });
 });

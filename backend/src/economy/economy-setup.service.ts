@@ -1,13 +1,13 @@
-import { Injectable, Logger } from '@nestjs/common';
-import { PermissionFlagsBits } from 'discord.js';
-import { and, eq } from 'drizzle-orm';
+import { Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
+import { PermissionFlagsBits, PermissionsBitField } from 'discord.js';
+import { and, eq, sql } from 'drizzle-orm';
 import { DatabaseService } from '../db/database.service';
 import { economyAuditLog, economySettings, economyWallets, shopItems } from '../db/schema';
 import { RedisService } from '../redis/redis.service';
 import { DiscordRestService } from '../discord/discord-rest.service';
 import { defaultEconomySettings, economySettingsSchema, type EconomySettings } from './economy.schema';
 import { EconomyWindowService } from './economy-window.service';
-import { formatCurrency } from './economy-format';
+import { guildChannelsCacheKey } from '../guilds/guild-events';
 import { EconomyMessageService } from './economy-message.service';
 
 const DEFAULT_STORE = [
@@ -28,30 +28,54 @@ const DEFAULT_ROLES = [
 ] as const;
 
 function economyCategoryOverwrites(guildId: string, botId: string) {
+  const memberAllow = PermissionFlagsBits.ViewChannel
+    | PermissionFlagsBits.ReadMessageHistory
+    | PermissionFlagsBits.SendMessages
+    | PermissionFlagsBits.UseApplicationCommands
+    | PermissionFlagsBits.AddReactions;
+  const botAllow = memberAllow
+    | PermissionFlagsBits.EmbedLinks
+    | PermissionFlagsBits.ManageMessages;
+
   return [
-    { id: guildId, type: 0, allow: String(PermissionFlagsBits.ViewChannel), deny: '0' },
+    {
+      id: guildId,
+      type: 0,
+      allow: String(memberAllow),
+      deny: String(PermissionsBitField.All & ~memberAllow),
+    },
     ...(botId ? [{
       id: botId,
       type: 1,
-      allow: String(PermissionFlagsBits.ViewChannel),
+      allow: String(botAllow),
       deny: '0',
     }] : []),
   ];
 }
 
-function economyChannelOverwrites(guildId: string, botId: string, commandsOnly: boolean) {
-  const memberAllow = PermissionFlagsBits.ViewChannel
-    | (commandsOnly ? PermissionFlagsBits.UseApplicationCommands : 0n);
-  const memberDeny = PermissionFlagsBits.SendMessages
-    | (commandsOnly ? 0n : PermissionFlagsBits.UseApplicationCommands);
+function economyChannelOverwrites(guildId: string, botId: string, readOnly: boolean) {
+  const memberAllow = readOnly
+    ? PermissionFlagsBits.ViewChannel | PermissionFlagsBits.ReadMessageHistory
+    : PermissionFlagsBits.ViewChannel
+      | PermissionFlagsBits.ReadMessageHistory
+      | PermissionFlagsBits.SendMessages
+      | PermissionFlagsBits.UseApplicationCommands
+      | PermissionFlagsBits.AddReactions;
   const botAllow = PermissionFlagsBits.ViewChannel
-    | PermissionFlagsBits.SendMessages
-    | PermissionFlagsBits.EmbedLinks
     | PermissionFlagsBits.ReadMessageHistory
+    | PermissionFlagsBits.SendMessages
+    | PermissionFlagsBits.UseApplicationCommands
+    | PermissionFlagsBits.AddReactions
+    | PermissionFlagsBits.EmbedLinks
     | PermissionFlagsBits.ManageMessages;
 
   return [
-    { id: guildId, type: 0, allow: String(memberAllow), deny: String(memberDeny) },
+    {
+      id: guildId,
+      type: 0,
+      allow: String(memberAllow),
+      deny: String(PermissionsBitField.All & ~memberAllow),
+    },
     ...(botId ? [{ id: botId, type: 1, allow: String(botAllow), deny: '0' }] : []),
   ];
 }
@@ -76,14 +100,41 @@ export class EconomySetupService {
     private readonly messages: EconomyMessageService,
   ) {}
 
+  private economyCacheKey(guildId: string): string {
+    return `guild:${guildId}:economy-state`;
+  }
+
+  async invalidateCache(guildId: string): Promise<void> {
+    await this.redis.client.del(this.economyCacheKey(guildId)).catch(() => undefined);
+    const rev = await this.redis.client.incr(`guild:${guildId}:rev`).catch(() => 0);
+    await this.redis.client.publish(
+      `guild:${guildId}:events`,
+      JSON.stringify({ type: 'updated', guildId, kind: 'economy', data: {}, rev }),
+    ).catch(() => undefined);
+  }
+
   async get(guildId: string): Promise<{ settings: EconomySettings; state: EconomyStatus } | null> {
+    const cacheKey = this.economyCacheKey(guildId);
+    const cached = await this.redis.client.get(cacheKey).catch(() => null);
+    if (cached) {
+      try {
+        return JSON.parse(cached) as { settings: EconomySettings; state: EconomyStatus };
+      } catch {
+        // Ignore malformed cache
+      }
+    }
     const rows = await this.database.db.select().from(economySettings).where(eq(economySettings.guildId, guildId)).limit(1);
     if (!rows[0]) return null;
     const parsed = economySettingsSchema.safeParse(rows[0].config);
     const settings = parsed.success ? parsed.data : defaultEconomySettings();
-    const walletCount = await this.database.db.select({ guildId: economyWallets.guildId }).from(economyWallets);
-    const count = walletCount.filter((row) => row.guildId === guildId).length;
-    return { settings, state: await this.status(guildId, count, rows[0]) };
+    const countRows = await this.database.db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(economyWallets)
+      .where(eq(economyWallets.guildId, guildId));
+    const count = countRows[0]?.count ?? 0;
+    const result = { settings, state: await this.status(guildId, count, rows[0]) };
+    await this.redis.client.set(cacheKey, JSON.stringify(result), 'EX', 60).catch(() => undefined);
+    return result;
   }
 
   async enable(guildId: string, guildName: string, actorId: string, source: 'dashboard' | 'command') {
@@ -94,9 +145,12 @@ export class EconomySetupService {
       const before = await this.database.db.select().from(economySettings).where(eq(economySettings.guildId, guildId)).limit(1);
       const settings = before[0] ? economySettingsSchema.parse(before[0].config) : defaultEconomySettings();
 
-      await this.discord.getGuildAsBot(guildId);
-      const roles = await this.discord.getGuildRoles(guildId);
-      const botMember = await this.discord.getGuildMember(guildId, process.env.DISCORD_CLIENT_ID ?? '');
+      const [, roles, botMember, channels] = await Promise.all([
+        this.discord.getGuildAsBot(guildId),
+        this.discord.getGuildRoles(guildId),
+        this.discord.getGuildMember(guildId, process.env.DISCORD_CLIENT_ID ?? ''),
+        this.discord.getGuildChannels(guildId),
+      ]);
       let botPermissions = 0n;
       for (const role of roles) {
         if (role.id === guildId || botMember.roles.includes(role.id)) {
@@ -123,7 +177,7 @@ export class EconomySetupService {
           channels: {},
         };
       }
-      const channels = await this.discord.getGuildChannels(guildId);
+
       const storedCategory = before[0]?.categoryId
         ? channels.find((channel) => channel.id === before[0]!.categoryId && channel.type === 4)
         : undefined;
@@ -158,21 +212,18 @@ export class EconomySetupService {
       });
 
       const channelDefs = [
-        ['rulesChannelId', 'economy-rules', 0],
-        ['commandsChannelId', 'economy-commands', 0],
-        ['leaderboardChannelId', 'leaderboard', 0],
-        ['storeChannelId', 'store', 0],
-        ['heistLogChannelId', 'heist-log', 0],
-        ['announcementsChannelId', 'economy-announcements', 0],
+        ['announcementsChannelId', 'economy-announcements', 0, true],
+        ['rulesChannelId', 'economy-rules', 0, true],
+        ['leaderboardChannelId', 'leaderboard', 0, true],
+        ['commandsChannelId', 'economy-commands', 0, false],
+        ['storeChannelId', 'store', 0, false],
+        ['heistLogChannelId', 'heist-log', 0, true],
       ] as const;
       const saved: Record<string, string | null> = {};
-      for (const [field, name, type] of channelDefs) {
+      for (const [position, [field, name, type, readOnly]] of channelDefs.entries()) {
         const savedId = before[0]?.[field];
         let channel = savedId
-          ? channels.find((item) => item.id === savedId
-            && item.type === type
-            && item.parent_id === categoryId
-            && item.name === name)
+          ? channels.find((item) => item.id === savedId && item.type === type)
           : undefined;
         if (!channel) channel = channels.find((item) =>
           item.name === name
@@ -182,22 +233,23 @@ export class EconomySetupService {
         const permissionOverwrites = economyChannelOverwrites(
           guildId,
           botId,
-          field === 'commandsChannelId',
+          readOnly,
         );
+        const channelBody = {
+          name,
+          parent_id: categoryId,
+          position,
+          permission_overwrites: permissionOverwrites,
+        };
         if (!channel) {
           channel = await this.discord.createGuildChannel(guildId, {
-            name,
+            ...channelBody,
             type,
-            parent_id: categoryId,
-            permission_overwrites: permissionOverwrites,
           });
         } else {
-          await this.discord.editGuildChannel(channel.id, {
-            permission_overwrites: permissionOverwrites,
-          });
+          await this.discord.editGuildChannel(channel.id, channelBody);
         }
         saved[field] = channel.id;
-        await this.saveChannelId(guildId, field, channel.id);
       }
 
       await this.database.db.insert(economySettings).values({
@@ -241,21 +293,29 @@ export class EconomySetupService {
       await this.database.db.update(economySettings).set({ defaultsSeeded: true, updatedAt: now })
         .where(eq(economySettings.guildId, guildId));
 
+      await this.redis.client.del(guildChannelsCacheKey(guildId), `discord:cache:channels:${guildId}`).catch(() => undefined);
       await this.createOrRepairMessages(guildId, guildName, saved, before[0]);
-      await this.messages.updateRules(guildId, guildName);
-      await this.messages.updateStore(guildId);
-      await this.messages.refreshLeaderboard(guildId);
-      await this.messages.updateRobbingInfo(guildId);
+      await Promise.all([
+        this.messages.updateRules(guildId, guildName),
+        this.messages.updateStore(guildId),
+        this.messages.refreshLeaderboard(guildId),
+        this.messages.updateRobbingInfo(guildId),
+      ]);
 
       await this.database.db.insert(economyAuditLog).values({
         guildId, actorId, source, action: 'economy.enable', before: before[0] ? { enabled: before[0].enabled } : null,
         after: { enabled: true, guildName },
       });
       await this.windows.reconcile(guildId);
+      await this.invalidateCache(guildId);
       return { ok: true, message: 'Economy enabled.', channels: saved };
     } catch (error) {
-      this.logger.error(`Economy setup failed guild=${guildId}: ${(error as Error).message}`);
-      return { ok: false, message: (error as Error).message };
+      const cause = error instanceof Error && error.cause instanceof Error ? error.cause : error;
+      this.logger.error(`Economy setup failed guild=${guildId}: ${cause instanceof Error ? cause.message : String(cause)}`);
+      throw new InternalServerErrorException(
+        'Economy setup failed. Verify database migrations are applied and try again.',
+        { cause: error },
+      );
     } finally {
       await this.redis.client.del(lockKey);
     }
@@ -265,32 +325,41 @@ export class EconomySetupService {
     await this.database.db.update(economySettings).set({ enabled: false, updatedAt: new Date() }).where(eq(economySettings.guildId, guildId));
     await this.database.db.insert(economyAuditLog).values({ guildId, actorId, source, action: 'economy.disable', after: { enabled: false } });
     await this.windows.cancelScheduledJobs(guildId);
+    await this.invalidateCache(guildId);
   }
 
   async pause(guildId: string, actorId: string, source: 'dashboard' | 'command') {
     await this.database.db.update(economySettings).set({ paused: true, updatedAt: new Date() }).where(eq(economySettings.guildId, guildId));
     await this.database.db.insert(economyAuditLog).values({ guildId, actorId, source, action: 'economy.pause', after: { paused: true } });
     await this.windows.cancelScheduledJobs(guildId);
+    await this.invalidateCache(guildId);
   }
 
   async resume(guildId: string, actorId: string, source: 'dashboard' | 'command') {
     await this.database.db.update(economySettings).set({ paused: false, updatedAt: new Date() }).where(eq(economySettings.guildId, guildId));
     await this.database.db.insert(economyAuditLog).values({ guildId, actorId, source, action: 'economy.resume', after: { paused: false } });
     await this.windows.reconcile(guildId);
+    await this.invalidateCache(guildId);
   }
 
-  async updateSettings(guildId: string, settings: EconomySettings, actorId: string) {
+  async updateSettings(guildId: string, settings: EconomySettings, actorId: string, guildName?: string) {
     const parsed = economySettingsSchema.parse(settings);
     const existing = await this.database.db.select().from(economySettings).where(eq(economySettings.guildId, guildId)).limit(1);
     await this.database.db.update(economySettings).set({ config: parsed, updatedAt: new Date() }).where(eq(economySettings.guildId, guildId));
     await this.database.db.insert(economyAuditLog).values({ guildId, actorId, source: 'dashboard', action: 'economy.settings.update', after: parsed as unknown as Record<string, unknown> });
     if (existing[0]?.categoryId) {
-      await this.discord.editGuildChannel(existing[0].categoryId, { name: parsed.economyName });
+      await this.discord.editGuildChannel(existing[0].categoryId, { name: parsed.economyName }).catch((err) => {
+        this.logger.warn(`Failed to rename economy category for guild=${guildId}: ${(err as Error).message}`);
+      });
     }
-    await this.messages.updateRules(guildId, existing[0]?.guildId ? (await this.discord.getGuildAsBot(guildId)).name : 'Server');
-    await this.messages.updateStore(guildId);
-    await this.messages.refreshLeaderboard(guildId);
-    await this.messages.updateRobbingInfo(guildId);
+    const resolvedName = guildName ?? (existing[0]?.guildId ? (await this.discord.getGuildAsBot(guildId).catch(() => ({ name: 'Server' }))).name : 'Server');
+    await Promise.allSettled([
+      this.messages.updateRules(guildId, resolvedName),
+      this.messages.updateStore(guildId),
+      this.messages.refreshLeaderboard(guildId),
+      this.messages.updateRobbingInfo(guildId),
+    ]);
+    await this.invalidateCache(guildId);
   }
 
   async status(guildId: string, walletCount = 0, row?: typeof economySettings.$inferSelect): Promise<EconomyStatus> {
@@ -377,65 +446,16 @@ export class EconomySetupService {
       await this.database.db.update(economySettings).set({ panelMessageId: panel.id }).where(eq(economySettings.guildId, guildId));
     }
 
-    if (!before?.storeMessageId && saved.storeChannelId) {
-      const items = await this.database.db.select().from(shopItems)
-        .where(eq(shopItems.guildId, guildId)).orderBy(shopItems.sortOrder);
-      const enabled = items.filter((item) => item.enabled);
-      const store = await this.discord.createChannelMessage(saved.storeChannelId, {
-        embeds: [{
-          title: `${settings.economyName} store`,
-          description: enabled.length
-            ? enabled.map((item) => `**${item.name}** — ${formatCurrency(item.price, settings)}`).join('\n').slice(0, 4096)
-            : 'No store items are enabled.',
-          color: 0x5865f2,
-        }],
-      });
-      await this.database.db.update(economySettings).set({ storeMessageId: store.id }).where(eq(economySettings.guildId, guildId));
-    }
 
-    if (!before?.leaderboardMessageId && saved.leaderboardChannelId) {
-      const leaderboard = await this.discord.createChannelMessage(saved.leaderboardChannelId, {
-        embeds: [{ title: `${settings.economyName}: Richest members`, description: 'The leaderboard is being prepared.', color: 0x5865f2 }],
-      });
-      await this.database.db.update(economySettings).set({ leaderboardMessageId: leaderboard.id }).where(eq(economySettings.guildId, guildId));
-    }
-
-    if (!before?.countdownMessageId && saved.announcementsChannelId) {
-      const countdown = await this.discord.createChannelMessage(saved.announcementsChannelId, {
-        content: `Rob any time with /robuser. Buy a Robbingusertool from /shop for 400 ${settings.currencyName}; it is consumed only after a successful robbery.`,
-      });
-      await this.discord.pinChannelMessage(saved.announcementsChannelId, countdown.id);
-      await this.database.db.update(economySettings).set({ countdownMessageId: countdown.id }).where(eq(economySettings.guildId, guildId));
-    }
-
-    if (!before?.rulesMessageIds?.length && saved.rulesChannelId) {
-      const ids: string[] = [];
-      const embeds = [
-        { title: 'Start here', description: `Welcome to ${settings.economyName} for ${guildName}. Earn ${settings.currencyName}, spend in the store and rob members any time with a Robbingusertool. Go to <#${saved.commandsChannelId ?? ''}> and use /reward.`, color: 0x5865f2 },
-        { title: 'All commands', description: '/reward, /balance, /shop, /store, /buy, /robuser, /gift and /leaderboard. Economy commands only work in economy-commands.', color: 0x5865f2 },
-        { title: 'Daily rewards and streaks', description: `Use /reward once per local day. Day 1 gives ${formatCurrency(settings.dailyAmount, settings)}. The streak can grow by ${formatCurrency(settings.streakStep, settings)} per day, up to ${settings.streakCapDays} days.`, color: 0x5865f2 },
-        { title: 'Robbing', description: `Use /robuser any time. A Robbingusertool costs 400 ${settings.currencyName}, allows one successful robbery of up to ${formatCurrency(200, settings)}, and is consumed after success. No member can be robbed below ${formatCurrency(Math.max(50, settings.protectionThreshold), settings)}.`, color: 0x5865f2 },
-        { title: 'The store', description: 'Open the store channel or use /shop or /store. Steal-related items take effect as soon as they are bought.', color: 0x5865f2 },
-        { title: 'Gifts and fair play', description: `Send up to ${formatCurrency(settings.weeklyGiftSendLimit, settings)} each week and receive up to ${formatCurrency(settings.weeklyGiftReceiveLimit, settings)}. Staff changes are logged.`, color: 0x5865f2 },
-      ];
-      for (const embed of embeds) {
-        const message = await this.discord.createChannelMessage(saved.rulesChannelId, { embeds: [embed] });
-        ids.push(message.id);
-      }
-      await this.database.db.update(economySettings).set({ rulesMessageIds: ids, rulesHash: '' })
-        .where(eq(economySettings.guildId, guildId));
-    }
   }
 
   private async seedDefaults(guildId: string) {
-    for (const [index, item] of DEFAULT_STORE.entries()) {
-      const [itemId, name, description, price] = item;
-      await this.database.db.insert(shopItems).values({
+    await this.database.db.insert(shopItems).values(
+      DEFAULT_STORE.map(([itemId, name, description, price], index) => ({
         guildId, itemId, kind: itemId, name, description, price, enabled: true, isDefault: true, sortOrder: index,
-      }).onConflictDoNothing();
-    }
-    for (const [index, role] of DEFAULT_ROLES.entries()) {
-      const [itemId, name, description, price, color] = role;
+      })),
+    ).onConflictDoNothing();
+    await Promise.all(DEFAULT_ROLES.map(async ([itemId, name, description, price, color], index) => {
       try {
         const created = await this.discord.createRole(guildId, name, '0', color);
         await this.database.db.insert(shopItems).values({
@@ -445,7 +465,7 @@ export class EconomySetupService {
       } catch (error) {
         this.logger.warn(`Could not create default economy role ${name}: ${(error as Error).message}`);
       }
-    }
+    }));
   }
 
   private async seedRobbingUserTool(guildId: string) {

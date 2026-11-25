@@ -6,10 +6,11 @@ The economy is opt-in. Currency is always **Dex**; the dashboard does not let ow
 
 - Use `/economy on` or enable Economy from the guild dashboard.
 - DexBotX creates or repairs the Economy category and six economy channels.
-- Economy channels remain public. Regular member messages are blocked, and application commands are accepted only in `economy-commands`.
+- Economy channels remain public and ordered `economy-announcements`, `economy-rules`, `leaderboard`, `economy-commands`, `store`, `heist-log`. Category permissions allow viewing, history, text, application commands, and reactions; `economy-commands` and `store` inherit them. The other four channels allow only viewing and history. Slash-command handling remains restricted to `economy-commands`.
 - Required bot permissions are View Channels, Manage Channels, Manage Roles, Send Messages, Embed Links, Manage Messages and Read Message History.
 - Setup creates the default Discord store catalog and default cosmetic roles the first time. Existing data and channel IDs are kept.
 - After applying economy migrations, run `/economy on` (or use dashboard Enable/repair) to refresh the Discord store and remove retired default items.
+- If Discord stops allowing edits to an older Store or Rules message, DexBotX posts a replacement, saves its ID, and removes the superseded message. This edit-limit response is not retried as a transient 429.
 
 ## Member-facing behavior
 

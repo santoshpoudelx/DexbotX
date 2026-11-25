@@ -16,7 +16,7 @@
     "start:worker:dev": "nest start --watch --entryFile worker/worker",
     "typecheck": "tsc --noEmit -p tsconfig.spec.json",
     "test": "jest --config jest.config.js",
-    "test:e2e": "jest --config jest.e2e.config.js --runInBand --forceExit",
+    "test:e2e": "jest --config jest.e2e.config.js --runInBand --forceExit test/api.e2e-spec.ts",
     "economy:test:up": "docker compose -f ../docker-compose.test.yml up -d --wait",
     "economy:test:migrate": "node scripts/economy-test-migrate.js",
     "economy:test:run": "jest --config jest.e2e.config.js --runInBand --forceExit test/economy.e2e-spec.ts",

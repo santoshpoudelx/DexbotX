@@ -14,7 +14,8 @@ import { canManageGuild } from '../shared/permissions';
 import { sha256Hex } from '../shared/crypto';
 import { StatsService } from '../admin/stats.service';
 
-const USER_GUILDS_TTL = 60;
+const USER_GUILDS_TTL = 300;
+const USER_GUILDS_STALE_TTL = 24 * 60 * 60;
 const CHANNELS_TTL = 60 * 60;
 const GUILD_META_TTL = 15 * 60;
 const CHANNEL_COLD_MISS_LOCK_TTL = 10;
@@ -50,9 +51,23 @@ interface GuildChannelSnapshot {
   position: number;
 }
 
+const L1_TTL_MS = 15_000;
+const L1_MAX_ENTRIES = 2000;
+
 @Injectable()
 export class GuildsService {
   private readonly logger = new Logger(GuildsService.name);
+  private readonly inflightUserGuilds = new Map<string, Promise<DiscordUserGuild[]>>();
+  private readonly userGuildsL1 = new Map<string, { value: DiscordUserGuild[]; expires: number }>();
+  private readonly guildMetaL1 = new Map<string, { value: GuildRow; expires: number }>();
+
+  private setL1<T>(map: Map<string, { value: T; expires: number }>, key: string, value: T): void {
+    if (map.size >= L1_MAX_ENTRIES) {
+      const oldest = map.keys().next().value;
+      if (oldest) map.delete(oldest);
+    }
+    map.set(key, { value, expires: Date.now() + L1_TTL_MS });
+  }
 
   constructor(
     @Inject(APP_CONFIG) private readonly config: AppConfig,
@@ -80,6 +95,7 @@ export class GuildsService {
   }
 
   async forgetUserGuilds(userId: string): Promise<void> {
+    this.userGuildsL1.delete(userId);
     await this.redis.client.del(`ug:${userId}`);
   }
 
@@ -144,6 +160,7 @@ export class GuildsService {
             updatedAt: sql`excluded.updated_at`,
           },
         });
+      this.guildMetaL1.delete(guildId);
       await this.redis.client.del(guildMetaCacheKey(guildId));
       return this.findInstalled(guildId);
     } catch (error) {
@@ -162,36 +179,103 @@ export class GuildsService {
     }
   }
 
-  /** The user's servers from Discord, cached for a minute (Discord rate limits this endpoint). */
+  /** The user's servers from Discord, cached with L1 + Redis single-flight coalescing and stale fallback on 429. */
   async getUserGuilds(session: SessionData, sid?: string): Promise<DiscordUserGuild[]> {
+    const l1Hit = this.userGuildsL1.get(session.userId);
+    if (l1Hit && l1Hit.expires > Date.now()) {
+      return l1Hit.value;
+    }
     const key = `ug:${session.userId}`;
+    const staleKey = `ug:stale:${session.userId}`;
     const cached = await this.redis.client.get(key);
     if (cached) {
       await this.stats.hit('userGuilds');
-      return JSON.parse(cached) as DiscordUserGuild[];
+      const parsed = JSON.parse(cached) as DiscordUserGuild[];
+      this.setL1(this.userGuildsL1, session.userId, parsed);
+      return parsed;
     }
-    await this.stats.miss('userGuilds');
-    const accessToken = this.sessions.accessToken(session);
-    const [blockedUntil, userBlockedUntil] = await Promise.all([
-      this.redis.client.get('discord:blocked_until'),
-      this.redis.client.get(`discord:blocked:user:${sha256Hex(`Bearer ${accessToken}`)}`),
-    ]);
-    const now = Date.now();
-    const blocked = Math.max(Number(blockedUntil ?? 0), Number(userBlockedUntil ?? 0));
-    if (blocked > now) {
-      throw new ServiceUnavailableException('Discord is temporarily rate limited and no cached server list is available.');
-    }
-    try {
-      const list = await this.discord.getCurrentUserGuilds(accessToken);
-      await this.redis.client.set(key, JSON.stringify(list), 'EX', USER_GUILDS_TTL);
-      return list;
-    } catch (err) {
-      if (err instanceof DiscordApiError && err.status === 401) {
-        if (sid) await this.sessions.destroy(sid);
-        throw new UnauthorizedException('Your Discord session expired. Log in again.');
+
+    const existing = this.inflightUserGuilds.get(session.userId);
+    if (existing) return existing;
+
+    const promise = (async (): Promise<DiscordUserGuild[]> => {
+      const lockKey = `ug:lock:${session.userId}`;
+      const lockToken = randomUUID();
+      const acquired = await this.redis.client.set(lockKey, lockToken, 'EX', 10, 'NX');
+      if (acquired !== 'OK') {
+        for (let attempt = 0; attempt < 25; attempt++) {
+          await new Promise((resolve) => setTimeout(resolve, 80));
+          const warmed = await this.redis.client.get(key);
+          if (warmed) {
+            await this.stats.hit('userGuilds');
+            return JSON.parse(warmed) as DiscordUserGuild[];
+          }
+        }
       }
-      throw err;
-    }
+
+      try {
+        const rechecked = await this.redis.client.get(key);
+        if (rechecked) {
+          await this.stats.hit('userGuilds');
+          return JSON.parse(rechecked) as DiscordUserGuild[];
+        }
+        await this.stats.miss('userGuilds');
+        const accessToken = this.sessions.accessToken(session);
+        const [blockedUntil, userBlockedUntil] = await Promise.all([
+          this.redis.client.get('discord:blocked_until'),
+          this.redis.client.get(`discord:blocked:user:${sha256Hex(`Bearer ${accessToken}`)}`),
+        ]);
+        const now = Date.now();
+        const blocked = Math.max(Number(blockedUntil ?? 0), Number(userBlockedUntil ?? 0));
+        if (blocked > now) {
+          const stale = await this.redis.client.get(staleKey);
+          if (stale) {
+            await this.redis.client.set(key, stale, 'EX', 30);
+            return JSON.parse(stale) as DiscordUserGuild[];
+          }
+          throw new ServiceUnavailableException('Discord is temporarily rate limited and no cached server list is available.');
+        }
+        try {
+          const list = await this.discord.getCurrentUserGuilds(accessToken);
+          const serialized = JSON.stringify(list);
+          await Promise.all([
+            this.redis.client.set(key, serialized, 'EX', USER_GUILDS_TTL),
+            this.redis.client.set(staleKey, serialized, 'EX', USER_GUILDS_STALE_TTL),
+          ]);
+          this.setL1(this.userGuildsL1, session.userId, list);
+          return list;
+        } catch (err) {
+          if (err instanceof DiscordApiError && err.status === 401) {
+            if (sid) await this.sessions.destroy(sid);
+            throw new UnauthorizedException('Your Discord session expired. Log in again.');
+          }
+          if (err instanceof DiscordApiError && err.status === 429) {
+            const stale = await this.redis.client.get(staleKey);
+            if (stale) {
+              await this.redis.client.set(key, stale, 'EX', 30);
+              return JSON.parse(stale) as DiscordUserGuild[];
+            }
+          }
+          throw err;
+        }
+      } finally {
+        if (acquired === 'OK') {
+          await this.redis.client.eval(
+            "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end",
+            1,
+            lockKey,
+            lockToken,
+          ).catch(() => undefined);
+        }
+      }
+    })().finally(() => {
+      if (this.inflightUserGuilds.get(session.userId) === promise) {
+        this.inflightUserGuilds.delete(session.userId);
+      }
+    });
+
+    this.inflightUserGuilds.set(session.userId, promise);
+    return promise;
   }
 
   async listForUser(session: SessionData, sid?: string): Promise<GuildSummary[]> {
@@ -218,17 +302,23 @@ export class GuildsService {
   }
 
   async findInstalled(guildId: string): Promise<GuildRow | null> {
+    const l1Hit = this.guildMetaL1.get(guildId);
+    if (l1Hit && l1Hit.expires > Date.now()) {
+      return l1Hit.value;
+    }
     const cached = await this.redis.client.get(guildMetaCacheKey(guildId));
     if (cached) {
       const row = JSON.parse(cached) as CachedGuildRow;
       if (!row.installed) return null;
-      return {
+      const hydrated: GuildRow = {
         ...row,
         joinedAt: new Date(row.joinedAt),
         leftAt: row.leftAt ? new Date(row.leftAt) : null,
         lastSyncedAt: row.lastSyncedAt ? new Date(row.lastSyncedAt) : null,
         updatedAt: new Date(row.updatedAt),
       };
+      this.setL1(this.guildMetaL1, guildId, hydrated);
+      return hydrated;
     }
     const rows = await this.database.db
       .select()
@@ -236,7 +326,10 @@ export class GuildsService {
       .where(and(eq(guilds.id, guildId), eq(guilds.installed, true)))
       .limit(1);
     const row = rows[0] ?? null;
-    if (row) await this.redis.client.set(guildMetaCacheKey(guildId), JSON.stringify(row), 'EX', GUILD_META_TTL);
+    if (row) {
+      await this.redis.client.set(guildMetaCacheKey(guildId), JSON.stringify(row), 'EX', GUILD_META_TTL);
+      this.setL1(this.guildMetaL1, guildId, row);
+    }
     return row;
   }
 

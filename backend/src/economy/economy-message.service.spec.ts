@@ -1,5 +1,6 @@
 import type { DatabaseService } from '../db/database.service';
 import { economySettings } from '../db/schema';
+import { DiscordApiError } from '../discord/discord-rest.service';
 import type { DiscordRestService } from '../discord/discord-rest.service';
 import type { RedisService } from '../redis/redis.service';
 import { defaultEconomySettings } from './economy.schema';
@@ -10,7 +11,10 @@ const robberId = '200000000000000001';
 const targetId = '200000000000000002';
 const channelId = '300000000000000001';
 
-function createService(storeItems: Record<string, unknown>[] = []) {
+function createService(
+  storeItems: Record<string, unknown>[] = [],
+  rowOverrides: Record<string, unknown> = {},
+) {
   const row = {
     guildId,
     config: defaultEconomySettings(),
@@ -18,7 +22,9 @@ function createService(storeItems: Record<string, unknown>[] = []) {
     paused: false,
     announcementsChannelId: channelId,
     storeChannelId: channelId,
+    ...rowOverrides,
   };
+  const updates: Record<string, unknown>[] = [];
   const database = {
     db: {
       select: jest.fn(() => ({
@@ -29,7 +35,10 @@ function createService(storeItems: Record<string, unknown>[] = []) {
         })),
       })),
       update: jest.fn(() => ({
-        set: jest.fn(() => ({ where: jest.fn().mockResolvedValue([]) })),
+        set: jest.fn((values: Record<string, unknown>) => {
+          updates.push(values);
+          return { where: jest.fn().mockResolvedValue([]) };
+        }),
       })),
     },
   };
@@ -37,14 +46,14 @@ function createService(storeItems: Record<string, unknown>[] = []) {
     createChannelMessage: jest.fn().mockResolvedValue({ id: '400000000000000001' }),
     getChannelMessage: jest.fn(),
     editChannelMessage: jest.fn(),
-    deleteChannelMessage: jest.fn(),
+    deleteChannelMessage: jest.fn().mockResolvedValue(undefined),
   };
   const service = new EconomyMessageService(
     database as unknown as DatabaseService,
     discord as unknown as DiscordRestService,
     {} as RedisService,
   );
-  return { service, discord };
+  return { service, discord, updates };
 }
 
 function storeItem(itemId: string, kind: string, name: string, price: number, description: string) {
@@ -120,6 +129,52 @@ describe('EconomyMessageService bounty announcements', () => {
       };
       expect(payload.embeds[0].description).toBe('No store items are available right now.');
       expect(payload.components).toEqual([]);
+    });
+
+    it('replaces a store message when Discord blocks further edits to old messages', async () => {
+      const oldMessageId = '400000000000000002';
+      const newMessageId = '500000000000000001';
+      const { service, discord, updates } = createService([], { storeMessageId: oldMessageId });
+      discord.editChannelMessage.mockRejectedValue(new DiscordApiError(
+        429,
+        undefined,
+        'Maximum number of edits to messages older than 1 hour reached.',
+        2.7,
+      ));
+      discord.createChannelMessage.mockResolvedValue({ id: newMessageId });
+
+      await service.updateStore(guildId);
+
+      expect(updates).toContainEqual({ storeMessageId: newMessageId });
+      expect(discord.deleteChannelMessage).toHaveBeenCalledWith(channelId, oldMessageId);
+    });
+
+    it('replaces only the rules message that hit the old-message edit limit', async () => {
+      const rulesMessageIds = Array.from({ length: 6 }, (_, index) => `60000000000000000${index}`);
+      const oldMessageId = rulesMessageIds[0];
+      const newMessageId = '700000000000000001';
+      const { service, discord, updates } = createService([], {
+        rulesChannelId: channelId,
+        commandsChannelId: channelId,
+        rulesMessageIds,
+        rulesHash: 'stale-hash',
+      });
+      discord.editChannelMessage.mockRejectedValueOnce(new DiscordApiError(
+        429,
+        undefined,
+        'Maximum number of edits to messages older than 1 hour reached.',
+        2.7,
+      ));
+      discord.createChannelMessage.mockResolvedValue({ id: newMessageId });
+
+      await service.updateRules(guildId, 'Test server');
+
+      expect(discord.createChannelMessage).toHaveBeenCalledTimes(1);
+      expect(updates).toContainEqual({
+        rulesMessageIds: [newMessageId, ...rulesMessageIds.slice(1)],
+        rulesHash: expect.any(String),
+      });
+      expect(discord.deleteChannelMessage).toHaveBeenCalledWith(channelId, oldMessageId);
     });
   });
 

@@ -21,7 +21,7 @@ This document describes the current economy behavior. The original project audit
 
 ## 1. Overview
 
-Server owners enable the economy from the dashboard or with `/economy on`. The bot creates a public Dex Economy category with its channels. Regular member messages are blocked, and application commands work only in `economy-commands`. Members earn daily Dex, spend it in a store, compete on a permanent leaderboard, and can rob one another any time by buying a Robbingusertool.
+Server owners enable the economy from the dashboard or with `/economy on`. The bot creates a public Dex Economy category with its channels. Members can send messages, use application commands, and add reactions in `economy-commands` and `store`; the other four channels are read-only. Economy slash-command handling remains restricted to `economy-commands`. Members earn daily Dex, spend it in a store, compete on a permanent leaderboard, and can rob one another any time by buying a Robbingusertool.
 
 All Dex amounts are whole numbers. No decimals anywhere.
 
@@ -147,23 +147,23 @@ Default roles:
 
 The bot creates everything itself. The owner never has to create a channel or a category.
 
-Layout, top to bottom, under a category named Economy:
+Layout, top to bottom, under the economy category:
 
-1. economy-rules: read-only guide for new members (full text in section 13).
-2. economy-commands: the only channel where economy commands run. Has a pinned panel with buttons: My Balance, Claim Daily, Shop. Other button replies are ephemeral; a successful daily claim is announced publicly here.
+1. economy-announcements: read-only general feed and pinned robbing instructions.
+2. economy-rules: read-only guide for new members (full text in section 13).
 3. leaderboard: read-only. One permanent embed with exactly the top 10 richest members. Edited in place every hour, only when something changed. No pages, no buttons.
-4. store: read-only. One permanent categorized embed listing every enabled item with its price and effect, with grouped purchase buttons (a select menu if buttons exceed Discord's row limit or there are more than 20 items).
-5. heist-log: read-only. Robbery results and staff-approved economy events.
-6. economy-announcements: read-only general feed and pinned robbing instructions.
+4. economy-commands: commands run here. Has a pinned panel with buttons: My Balance, Claim Daily, Shop. Other button replies are ephemeral; a successful daily claim is announced publicly here.
+5. store: members can browse the permanent categorized embed and use its purchase controls.
+6. heist-log: read-only. Robbery results and staff-approved economy events.
 
 Channel permissions:
 
 | Channel | Everyone can | Everyone cannot | Bot needs |
 | --- | --- | --- | --- |
-| economy-rules, leaderboard, store, heist-log, economy-announcements | View, read history | Send messages, use application commands | View, Send, Embed Links, Manage Messages (pin) |
-| economy-commands | View, read history, use application commands | Send regular messages | View, Send, Embed Links |
+| Category defaults; economy-commands, store | View, read history, send messages, use application commands, add reactions | All other channel permissions | View, read history, Send, Embed Links, Manage Messages (pin) |
+| economy-announcements, economy-rules, leaderboard, heist-log | View, read history | Send messages, use application commands, add reactions, and all other channel permissions | View, read history, Send, Embed Links, Manage Messages (pin) |
 
-The economy category and channels are public. Regular members cannot post text in any economy channel; only `economy-commands` permits application commands. The bot repairs these permissions when `/economy on` runs again. Buttons and select menus still work in read-only channels because they are interactions, not messages.
+The category grants @everyone the five listed permissions and explicitly denies its other channel permissions. `economy-commands` and `store` inherit those category permissions. The four read-only channels override the category to allow only viewing and reading history. Re-running `/economy on` repairs the category and channel overwrites and restores the requested channel order. Economy slash-command handling remains restricted to `economy-commands`; buttons and select menus in bot messages remain usable in read-only channels because they are interactions, not messages.
 
 The bot stores every channel ID and message ID in economy_settings. If any channel or message is deleted, the bot detects it (on the next hourly refresh or on the next `/economy on`) and recreates only the missing piece, never duplicates.
 

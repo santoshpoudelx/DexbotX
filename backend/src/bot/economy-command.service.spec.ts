@@ -1,3 +1,4 @@
+import { InternalServerErrorException } from '@nestjs/common';
 import { MessageFlags } from 'discord.js';
 import type {
   ButtonInteraction,
@@ -33,6 +34,7 @@ function createService(
       settings: defaultEconomySettings(),
       state: { enabled, paused, channels: { commands: options.commandsChannelId } },
     }),
+    enable: jest.fn().mockResolvedValue({ message: 'Economy enabled.' }),
   };
   const wallet = {
     claimDaily: jest.fn(),
@@ -164,6 +166,20 @@ function button(customId: string, userId = ownerId): ButtonInteraction {
 }
 
 describe('EconomyCommandService interaction guards', () => {
+  it('replies when economy setup fails with a server error', async () => {
+    const { service, setup } = createService();
+    setup.enable.mockRejectedValue(
+      new InternalServerErrorException('Economy setup failed. Verify database migrations are applied and try again.'),
+    );
+    const interaction = chatCommand('economy', commandsChannelId);
+
+    await service.handle(interaction);
+
+    expect(interaction.editReply).toHaveBeenCalledWith(
+      'Economy setup failed. Verify database migrations are applied and try again.',
+    );
+  });
+
   it.each(['economy:reward', 'economy:shop', 'economy:buy:item'])(
     'blocks the %s button while the economy is paused',
     async (customId) => {

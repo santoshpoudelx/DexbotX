@@ -1,4 +1,5 @@
 import type { NestExpressApplication } from '@nestjs/platform-express';
+import { InternalServerErrorException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { createCanvas } from '@napi-rs/canvas';
 import {
@@ -43,6 +44,7 @@ import { defaultAutoRoleConfig } from '../src/shared/auto-roles';
 import { ModerationService } from '../src/bot/moderation.service';
 import { HealthController } from '../src/health/health.controller';
 import { guildRolesCacheKey } from '../src/guilds/guild-events';
+import { EconomySetupService } from '../src/economy/economy-setup.service';
 
 const PG_PORT = 54329;
 const REDIS_PORT = 63799;
@@ -277,7 +279,11 @@ function onboardingGuild(
   systemChannel?: ReturnType<typeof onboardingChannel>,
   joinedTimestamp = Date.now(),
 ) {
-  const me = { id: 'bot' };
+  const me = {
+    id: 'bot',
+    roles: { highest: { id: 'bot-role', position: 1 } },
+    permissions: { has: () => false },
+  };
   return {
     id,
     name: `Guild ${id}`,
@@ -768,6 +774,7 @@ describe('DexBotX API', () => {
 
   it('avoids repeated Discord REST calls for cached user, guild, channel and preset reads', async () => {
     const redis = app.get(RedisService).client;
+    await app.get(GuildsService).forgetUserGuilds(USER_ID);
     const testSession = await app.get(SessionService).create(
       { id: USER_ID, username: 'tester', global_name: 'Test Er', avatar: null },
       { access_token: 'tok-abc', token_type: 'Bearer', expires_in: 604800, refresh_token: 'r', scope: 'identify guilds' },
@@ -805,9 +812,11 @@ describe('DexBotX API', () => {
 
   it('checks Embed Links when Auto Roles announcements use embeds', async () => {
     const discord = app.get(DiscordRestService);
+    const redis = app.get(RedisService).client;
     const previousRoles = stubGuildRoles;
     const previousBotRoleIds = stubBotRoleIds;
     try {
+      await redis.del(`discord:cache:roles:${G1}`, `discord:cache:member:${G1}:123456789012345678`);
       stubGuildRoles = [{
         id: G1,
         name: '@everyone',
@@ -825,6 +834,7 @@ describe('DexBotX API', () => {
         | PermissionFlagsBits.SendMessages
         | PermissionFlagsBits.EmbedLinks
       ).toString();
+      await redis.del(`discord:cache:roles:${G1}`);
       await expect(discord.canBotPost(C1, true)).resolves.toBe(true);
     } finally {
       stubGuildRoles = previousRoles;
@@ -1181,7 +1191,8 @@ describe('DexBotX API', () => {
     );
     const session = (await app.get(SessionService).get(cachedSession.sid))!;
 
-    await redis.del('discord:blocked_until', 'discord:cache:channels:' + G1);
+    await userGuilds.forgetUserGuilds(USER_ID);
+    await redis.del('discord:blocked_until', `discord:cache:channels:${G1}`);
     rateLimitGuildChannels = false;
     const minuteKey = `stat:min:${Math.floor(Date.now() / 60_000)}`;
     const totalBefore = Number(await redis.hget(minuteKey, 'd_total') ?? 0);
@@ -1215,7 +1226,8 @@ describe('DexBotX API', () => {
     expect(await userGuilds.getUserGuilds(session)).toEqual(cachedGuilds);
     expect(discordCalls).toHaveLength(0);
 
-    await redis.del('discord:blocked_until', `ug:${USER_ID}`, `discord:cache:channels:${G1}`);
+    await redis.del('discord:blocked_until', `discord:cache:channels:${G1}`);
+    await userGuilds.forgetUserGuilds(USER_ID);
   });
 
   it('lists only servers the user can manage, flagging where the bot is missing', async () => {
@@ -1251,6 +1263,22 @@ describe('DexBotX API', () => {
     const channels = ch.body.channels as ChannelSummary[];
     expect(channels.map((channel) => channel.name)).toEqual(['welcome', 'news']);
     expect(ch.body.channels[0].category).toBe('Info');
+  });
+
+  it('returns a server error when economy setup fails', async () => {
+    const setup = app.get(EconomySetupService);
+    const enable = jest.spyOn(setup, 'enable').mockRejectedValueOnce(
+      new InternalServerErrorException('Economy setup failed. Verify database migrations are applied and try again.'),
+    );
+
+    try {
+      const response = await http().post(`/guilds/${G1}/economy/enable`).set(authed()).expect(500);
+      expect(response.body.message).toBe(
+        'Economy setup failed. Verify database migrations are applied and try again.',
+      );
+    } finally {
+      enable.mockRestore();
+    }
   });
 
   it('validates and saves Auto Roles settings and protects test/activity endpoints', async () => {
@@ -1491,6 +1519,7 @@ describe('DexBotX API', () => {
   it('repairs channel access after a denied test post and retries once', async () => {
     const redis = app.get(RedisService).client;
     await redis.del(`permfix:${G1}:${C1}`);
+    await redis.del(`discord:cache:roles:${G1}`, `discord:cache:member:${G1}:123456789012345678`);
     stubGuildRoles = [];
     stubBotRoleIds = [];
     failMessagePost = false;
@@ -1510,6 +1539,7 @@ describe('DexBotX API', () => {
         PermissionFlagsBits.AttachFiles |
         PermissionFlagsBits.ReadMessageHistory
       ).toString(),
+      color: 0,
       mentionable: false,
       hoist: true,
     });
@@ -2200,8 +2230,8 @@ describe('Bot → queue → worker', () => {
   it('keeps the named API, shard and worker Redis clients below the connection budget', async () => {
     await workerModule.init();
     const apiRedis = app.get(RedisService);
-    expect(await apiRedis.connectedClients()).toBeLessThanOrEqual(10);
     const clientList = await apiRedis.client.call('CLIENT', 'LIST') as string;
+    expect(await apiRedis.connectedClients()).toBeLessThanOrEqual(10);
     for (const name of ['api:main', 'api:sub', 'shard0:main', 'shard0:sub', 'worker:main', 'worker:sub']) {
       expect(clientList).toContain(`name=${name}`);
     }

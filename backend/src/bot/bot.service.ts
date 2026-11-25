@@ -28,19 +28,15 @@ import { FeatureFlagsService } from '../core/feature-flags.service';
 import { OnboardingService } from '../discord/onboarding.service';
 import { ModerationService } from './moderation.service';
 import * as Sentry from '@sentry/node';
-<<<<<<< Updated upstream
 import { computeAutoRoleDelay, getAutoRoleSafetyReason } from '../shared/auto-roles';
-=======
-import { AUTO_ROLE_SLOT_SPACING_MS, computeAutoRoleDelay, getAutoRoleSafetyReason } from '../shared/auto-roles';
 import { DatabaseService } from '../db/database.service';
-import { autoRoleEvents, economyWallets } from '../db/schema';
+import { economyWallets } from '../db/schema';
 import { EconomyCommandService } from './economy-command.service';
 import { and, eq } from 'drizzle-orm';
 
 function isUnknownInteraction(error: unknown): boolean {
   return typeof error === 'object' && error !== null && 'code' in error && error.code === 10062;
 }
->>>>>>> Stashed changes
 
 @Injectable()
 export class BotService implements OnApplicationBootstrap, OnApplicationShutdown {
@@ -62,11 +58,8 @@ export class BotService implements OnApplicationBootstrap, OnApplicationShutdown
     private readonly onboarding: OnboardingService,
     private readonly redis: RedisService,
     private readonly moderation: ModerationService,
-<<<<<<< Updated upstream
-=======
     private readonly database: DatabaseService,
     private readonly economyCommands?: EconomyCommandService,
->>>>>>> Stashed changes
   ) {
     this.client = new Client({
       // Server Members is a privileged intent: enable it in the Developer Portal (Bot > Privileged Gateway Intents).
@@ -186,20 +179,15 @@ export class BotService implements OnApplicationBootstrap, OnApplicationShutdown
       await this.sync.deleteRole(role.guild.id, role.id);
       await this.sync.refreshBotStatusFromGateway(role.guild);
     }));
-<<<<<<< Updated upstream
-    c.on(Events.GuildMemberAdd, (m) => this.safe('welcome', () => this.handleMember('welcome', m)));
-    c.on(Events.GuildMemberUpdate, (oldMember, member) => this.safe('auto-role-update', () => this.handleAutoRoleMemberUpdate(oldMember, member)));
-    c.on(Events.GuildMemberAdd, (m) => this.safe('auto-role', () => this.handleAutoRoleMemberJoin(m)));
-    c.on(Events.GuildMemberRemove, (m) => this.safe('goodbye', async () => {
-      await this.redis.client.del(this.memberRolesKey(m.guild.id, m.id));
-=======
     c.on(Events.GuildMemberAdd, (member) => {
-      void this.database.db.update(economyWallets).set({ leftServer: false, updatedAt: new Date() })
-        .where(and(eq(economyWallets.guildId, member.guild.id), eq(economyWallets.userId, member.id)));
+      void this.safe('economy-member-join', () =>
+        this.database.db.update(economyWallets).set({ leftServer: false, updatedAt: new Date() })
+          .where(and(eq(economyWallets.guildId, member.guild.id), eq(economyWallets.userId, member.id))),
+      );
       void this.safe('welcome', () => this.handleMember('welcome', member))
         .then(() => this.safe('auto-role', () => this.handleAutoRoleMemberJoin(member)));
     });
-    c.on(Events.GuildMemberUpdate, (_oldMember, member) => this.safe('auto-role-update', () => this.handleAutoRoleMemberUpdate(member)));
+    c.on(Events.GuildMemberUpdate, (oldMember, member) => this.safe('auto-role-update', () => this.handleAutoRoleMemberUpdate(oldMember, member)));
     c.on(Events.GuildMemberRemove, (m) => this.safe('goodbye', async () => {
       await this.redis.client.del(
         this.memberRolesKey(m.guild.id, m.id),
@@ -207,7 +195,6 @@ export class BotService implements OnApplicationBootstrap, OnApplicationShutdown
       );
       await this.database.db.update(economyWallets).set({ leftServer: true, updatedAt: new Date() })
         .where(and(eq(economyWallets.guildId, m.guild.id), eq(economyWallets.userId, m.id)));
->>>>>>> Stashed changes
       await this.handleMember('goodbye', m);
     }));
     c.on(Events.Error, (err) => this.logger.error(`Client error: ${err.message}`));
