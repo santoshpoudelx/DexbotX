@@ -12,16 +12,23 @@ function makeHarness() {
     queue: { getJobCounts: jest.fn(async () => ({ waiting: 0 })) },
     enqueueAutoRole: jest.fn(async () => undefined),
   };
+  const pendingJoinKeys = new Set<string>();
   const redisClient = {
     get: jest.fn(async (_key: string) => null as string | null),
+    del: jest.fn(async (key: string) => {
+      pendingJoinKeys.delete(key);
+      return 1;
+    }),
+    exists: jest.fn(async (key: string) => key.includes('autorole-pending') && pendingJoinKeys.has(key) ? 1 : 0),
     set: jest.fn(async (key: string) => {
+      if (key.includes('autorole-pending')) pendingJoinKeys.add(key);
       if (!key.includes(':autorole:queued:')) return 'OK' as string | null;
       if (seenJoinKeys.has(key)) return null;
       seenJoinKeys.add(key);
       return 'OK' as string | null;
     }),
     eval: jest.fn(async (script: string, ..._args: Array<string | number>) =>
-      script.includes("redis.call('INCR'") ? 1 : 0),
+      script.includes("redis.call('set', key, reserved") ? 0 : 0),
   };
   const sync = {
     getRoles: jest.fn(async () => [{
@@ -41,8 +48,7 @@ function makeHarness() {
     {} as never,
     { client: redisClient } as never,
     {} as never,
-    {} as never,
-    {} as never,
+    { db: { insert: jest.fn(() => ({ values: jest.fn() })) } } as never,
   );
   const event = (pending: boolean) => ({
     id: '900000000000000003',
@@ -66,19 +72,23 @@ describe('BotService auto-role scheduling', () => {
     await harness.call('handleAutoRoleMemberJoin', pending);
     expect(harness.queue.enqueueAutoRole).not.toHaveBeenCalled();
 
-    await harness.call('handleAutoRoleMemberUpdate', pending, screened);
-    await harness.call('handleAutoRoleMemberUpdate', pending, screened);
+    await harness.call('handleAutoRoleMemberUpdate', screened);
+    await harness.call('handleAutoRoleMemberUpdate', screened);
 
     expect(harness.queue.enqueueAutoRole).toHaveBeenCalledTimes(1);
-    expect(harness.redisClient.eval).toHaveBeenCalledWith(
-      expect.stringContaining("redis.call('INCR'"),
-      1,
-      'guild:900000000000000002:joins:60',
-      '60',
-    );
-    const counterScript = harness.redisClient.eval.mock.calls.find(([script]) =>
-      script.includes("redis.call('INCR'"));
-    expect(counterScript?.[0]).toContain("redis.call('EXPIRE'");
+    expect(harness.queue.enqueueAutoRole).toHaveBeenCalledWith(expect.objectContaining({
+      readyTimestamp: expect.any(Number),
+      pending: false,
+    }), expect.any(Number));
+    expect(harness.redisClient.del).toHaveBeenCalledWith('guild:900000000000000002:autorole-pending:900000000000000003');
+    harness.service.client.destroy();
+  });
+
+  it('never queues a pending member even when legacy settings disable screening waits', async () => {
+    const harness = makeHarness();
+    harness.config.waitForScreening = false;
+    await harness.call('handleAutoRoleMemberJoin', harness.event(true));
+    expect(harness.queue.enqueueAutoRole).not.toHaveBeenCalled();
     harness.service.client.destroy();
   });
 });

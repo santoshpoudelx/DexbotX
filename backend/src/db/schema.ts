@@ -128,11 +128,12 @@ export const autoRoleEvents = pgTable(
     userId: text('user_id').notNull(),
     roleId: text('role_id').notNull(),
     outcome: text('outcome').notNull(),
+    delaySeconds: integer('delay_seconds'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
     index('auto_role_events_guild_created_idx').on(t.guildId, t.createdAt),
-    check('auto_role_events_outcome_check', sql`${t.outcome} in ('assigned', 'skipped_left', 'skipped_has_role', 'skipped_unsafe', 'failed')`),
+    check('auto_role_events_outcome_check', sql`${t.outcome} in ('assigned', 'skipped_left', 'skipped_has_role', 'skipped_unsafe', 'failed', 'enqueue_failed', 'skipped_pending')`),
   ],
 ).enableRLS();
 

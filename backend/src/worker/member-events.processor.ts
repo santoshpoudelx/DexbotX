@@ -18,7 +18,9 @@ import { eq, lte } from 'drizzle-orm';
 import { GuildSyncService } from '../bot/guild-sync.service';
 import type { APIEmbed } from 'discord.js';
 import {
+  AUTO_ROLE_SLOT_SPACING_MS,
   getAutoRoleSafetyReason,
+  secondsToMilliseconds,
   renderAutoRoleEmbed,
   renderAutoRoleTemplate,
   type AutoRoleConfig,
@@ -126,23 +128,26 @@ export class MemberEventsProcessor implements OnApplicationBootstrap, OnModuleDe
 
   private async processAutoRole(job: Job<AutoRoleJob>, token?: string): Promise<JobResult> {
     const data = job.data;
-    if (Date.now() - data.joinTimestamp > MAX_JOB_AGE_MS) {
-      return 'skipped-stale';
-    }
     const settings = await this.settings.get(data.guildId);
     if (!settings.autoRoles.enabled) return 'skipped-disabled';
-    if (data.pending && settings.autoRoles.waitForScreening) return 'skipped-disabled';
+    if (data.pending) {
+      await this.recordAutoRoleEvent(data.guildId, data.userId, settings.autoRoles.roleIds[0] ?? '', 'skipped_pending', this.autoRoleElapsedDelay(data.readyTimestamp));
+      return 'skipped-disabled';
+    }
 
     const lockKey = `guild:${data.guildId}:autorole-lock`;
     const lockToken = randomUUID();
     const lock = await this.redis.client.set(lockKey, lockToken, 'PX', 30_000, 'NX');
-    if (lock !== 'OK') return this.deferAutoRole(job, token, 1, settings.autoRoles.roleIds[0] ?? '', false);
+    if (lock !== 'OK') return this.deferAutoRole(job, token, 1);
 
     try {
       const currentSettings = await this.settings.get(data.guildId);
       const config = currentSettings.autoRoles;
       if (!config.enabled) return 'skipped-disabled';
-      if (data.pending && config.waitForScreening) return 'skipped-disabled';
+      if (data.pending) {
+        await this.recordAutoRoleEvent(data.guildId, data.userId, config.roleIds[0] ?? '', 'skipped_pending', this.autoRoleElapsedDelay(data.readyTimestamp));
+        return 'skipped-disabled';
+      }
 
       const roleId = config.roleIds[0];
       if (!roleId) return 'skipped-disabled';
@@ -160,7 +165,7 @@ export class MemberEventsProcessor implements OnApplicationBootstrap, OnModuleDe
         }
       }
       if (memberRoleIds.includes(roleId)) {
-        await this.recordAutoRoleEvent(data.guildId, data.userId, roleId, 'skipped_has_role');
+        await this.recordAutoRoleEvent(data.guildId, data.userId, roleId, 'skipped_has_role', this.autoRoleElapsedDelay(data.readyTimestamp));
         return 'sent';
       }
 
@@ -168,34 +173,38 @@ export class MemberEventsProcessor implements OnApplicationBootstrap, OnModuleDe
       const role = roles.find((item) => item.id === roleId);
       const botStatus = await this.guildSync.getBotStatus(data.guildId, roles);
       if (!role || getAutoRoleSafetyReason(data.guildId, role, botStatus)) {
-        await this.recordAutoRoleEvent(data.guildId, data.userId, roleId, 'skipped_unsafe');
+        await this.recordAutoRoleEvent(data.guildId, data.userId, roleId, 'skipped_unsafe', this.autoRoleElapsedDelay(data.readyTimestamp));
         return 'sent';
       }
 
       const blockedUntil = Number(await this.redis.client.get('discord:blocked_until') ?? 0);
       if (blockedUntil > Date.now()) {
-        return this.deferAutoRole(job, token, (blockedUntil - Date.now()) / 1000, roleId);
+        return this.deferAutoRole(job, token, (blockedUntil - Date.now()) / 1000);
+      }
+      const guildSlotWaitSeconds = await this.reserveAutoRoleAssignmentSlot(data.guildId);
+      if (guildSlotWaitSeconds > 0) {
+        return this.deferAutoRole(job, token, guildSlotWaitSeconds);
       }
 
       try {
         await this.discord.addMemberRole(data.guildId, data.userId, roleId, 'DexBotX auto role');
       } catch (error) {
         if (error instanceof DiscordApiError) {
-          if (error.status === 429) return this.deferAutoRole(job, token, error.retryAfter ?? 1, roleId);
+          if (error.status === 429) return this.deferAutoRole(job, token, error.retryAfter ?? 1);
           if (error.status === 404 && error.discordCode === 10011) {
-            await this.recordAutoRoleEvent(data.guildId, data.userId, roleId, 'skipped_unsafe');
+            await this.recordAutoRoleEvent(data.guildId, data.userId, roleId, 'skipped_unsafe', this.autoRoleElapsedDelay(data.readyTimestamp));
             return 'sent';
           }
           if (error.status === 404 && (error.discordCode === 10007 || error.discordCode === undefined)) {
-            await this.recordAutoRoleEvent(data.guildId, data.userId, roleId, 'skipped_left');
+            await this.recordAutoRoleEvent(data.guildId, data.userId, roleId, 'skipped_left', this.autoRoleElapsedDelay(data.readyTimestamp));
             return 'sent';
           }
           if (error.status === 403) {
-            await this.recordAutoRoleEvent(data.guildId, data.userId, roleId, 'skipped_unsafe');
+            await this.recordAutoRoleEvent(data.guildId, data.userId, roleId, 'skipped_unsafe', this.autoRoleElapsedDelay(data.readyTimestamp));
             return 'sent';
           }
         }
-        await this.recordAutoRoleEvent(data.guildId, data.userId, roleId, 'failed');
+        await this.recordAutoRoleEvent(data.guildId, data.userId, roleId, 'failed', this.autoRoleElapsedDelay(data.readyTimestamp));
         throw error;
       }
 
@@ -203,7 +212,7 @@ export class MemberEventsProcessor implements OnApplicationBootstrap, OnModuleDe
       updatedRoleIds.add(roleId);
       await this.redis.client.set(rolesKey, JSON.stringify([...updatedRoleIds]), 'EX', 30 * 60)
         .catch((error: unknown) => this.logger.warn(`Could not update member role cache guild=${data.guildId} user=${data.userId}: ${error instanceof Error ? error.message : String(error)}`));
-      await this.recordAutoRoleEvent(data.guildId, data.userId, roleId, 'assigned');
+      await this.recordAutoRoleEvent(data.guildId, data.userId, roleId, 'assigned', this.autoRoleElapsedDelay(data.readyTimestamp));
       if (config.announce.enabled && config.announce.channelId) {
         try {
           await this.queueAutoRoleAnnouncement(
@@ -238,25 +247,39 @@ export class MemberEventsProcessor implements OnApplicationBootstrap, OnModuleDe
     job: Job<AutoRoleJob>,
     token: string | undefined,
     delaySeconds: number,
-    roleId: string,
-    countRateLimit = true,
   ): Promise<never> {
     if (!token) throw new Error('BullMQ worker did not provide an active job token');
-    if (countRateLimit) {
-      const retries = job.data.rateLimitReschedules ?? 0;
-      if (retries >= 2) {
-        await this.recordAutoRoleEvent(job.data.guildId, job.data.userId, roleId, 'failed');
-        throw new Error('Auto-role assignment exhausted Discord rate-limit reschedules');
-      }
-      await job.updateData({ ...job.data, rateLimitReschedules: retries + 1 });
-    }
-    await job.moveToDelayed(Date.now() + Math.max(1000, Math.ceil(delaySeconds * 1000)), token);
+    await job.moveToDelayed(Date.now() + Math.max(1000, secondsToMilliseconds(delaySeconds)), token);
     throw new DelayedError();
   }
 
 
-  private async recordAutoRoleEvent(guildId: string, userId: string, roleId: string, outcome: 'assigned' | 'skipped_left' | 'skipped_has_role' | 'skipped_unsafe' | 'failed'): Promise<void> {
-    await this.database.db.insert(autoRoleEvents).values({ guildId, userId, roleId, outcome });
+  private async reserveAutoRoleAssignmentSlot(guildId: string): Promise<number> {
+    const waitMilliseconds = Number(await this.redis.client.eval(
+      `local now=tonumber(ARGV[1]); local next=tonumber(redis.call('get', KEYS[1])) or now; ` +
+      `if next > now then return next-now end; ` +
+      `redis.call('set', KEYS[1], now+tonumber(ARGV[2]), 'PX', 60000); return 0`,
+      1,
+      `guild:${guildId}:autorole-assignment-slot`,
+      String(Date.now()),
+      String(AUTO_ROLE_SLOT_SPACING_MS),
+    ));
+    return Math.ceil(waitMilliseconds / 1000);
+  }
+
+  private autoRoleElapsedDelay(readyTimestamp: number): number {
+    const startedAt = Number.isFinite(readyTimestamp) ? readyTimestamp : Date.now();
+    return Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+  }
+
+  private async recordAutoRoleEvent(
+    guildId: string,
+    userId: string,
+    roleId: string,
+    outcome: 'assigned' | 'skipped_left' | 'skipped_has_role' | 'skipped_unsafe' | 'failed' | 'enqueue_failed' | 'skipped_pending',
+    delaySeconds = 0,
+  ): Promise<void> {
+    await this.database.db.insert(autoRoleEvents).values({ guildId, userId, roleId, outcome, delaySeconds });
   }
 
   private async queueAutoRoleAnnouncement(

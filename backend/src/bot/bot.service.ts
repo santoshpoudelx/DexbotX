@@ -28,15 +28,9 @@ import { FeatureFlagsService } from '../core/feature-flags.service';
 import { OnboardingService } from '../discord/onboarding.service';
 import { ModerationService } from './moderation.service';
 import * as Sentry from '@sentry/node';
-import { computeAutoRoleDelay, getAutoRoleSafetyReason } from '../shared/auto-roles';
+import { AUTO_ROLE_SLOT_SPACING_MS, computeAutoRoleDelay, getAutoRoleSafetyReason } from '../shared/auto-roles';
 import { DatabaseService } from '../db/database.service';
-import { economyWallets } from '../db/schema';
-import { EconomyCommandService } from './economy-command.service';
-import { and, eq } from 'drizzle-orm';
-
-function isUnknownInteraction(error: unknown): boolean {
-  return typeof error === 'object' && error !== null && 'code' in error && error.code === 10062;
-}
+import { autoRoleEvents } from '../db/schema';
 
 @Injectable()
 export class BotService implements OnApplicationBootstrap, OnApplicationShutdown {
@@ -59,7 +53,6 @@ export class BotService implements OnApplicationBootstrap, OnApplicationShutdown
     private readonly redis: RedisService,
     private readonly moderation: ModerationService,
     private readonly database: DatabaseService,
-    private readonly economyCommands?: EconomyCommandService,
   ) {
     this.client = new Client({
       // Server Members is a privileged intent: enable it in the Developer Portal (Bot > Privileged Gateway Intents).
@@ -180,21 +173,15 @@ export class BotService implements OnApplicationBootstrap, OnApplicationShutdown
       await this.sync.refreshBotStatusFromGateway(role.guild);
     }));
     c.on(Events.GuildMemberAdd, (member) => {
-      void this.safe('economy-member-join', () =>
-        this.database.db.update(economyWallets).set({ leftServer: false, updatedAt: new Date() })
-          .where(and(eq(economyWallets.guildId, member.guild.id), eq(economyWallets.userId, member.id))),
-      );
       void this.safe('welcome', () => this.handleMember('welcome', member))
         .then(() => this.safe('auto-role', () => this.handleAutoRoleMemberJoin(member)));
     });
-    c.on(Events.GuildMemberUpdate, (oldMember, member) => this.safe('auto-role-update', () => this.handleAutoRoleMemberUpdate(oldMember, member)));
+    c.on(Events.GuildMemberUpdate, (_oldMember, member) => this.safe('auto-role-update', () => this.handleAutoRoleMemberUpdate(member)));
     c.on(Events.GuildMemberRemove, (m) => this.safe('goodbye', async () => {
       await this.redis.client.del(
         this.memberRolesKey(m.guild.id, m.id),
         `guild:${m.guild.id}:autorole-pending:${m.id}`,
       );
-      await this.database.db.update(economyWallets).set({ leftServer: true, updatedAt: new Date() })
-        .where(and(eq(economyWallets.guildId, m.guild.id), eq(economyWallets.userId, m.id)));
       await this.handleMember('goodbye', m);
     }));
     c.on(Events.Error, (err) => this.logger.error(`Client error: ${err.message}`));
@@ -346,15 +333,24 @@ export class BotService implements OnApplicationBootstrap, OnApplicationShutdown
     await this.cacheMemberRoleIds(member);
     const config = (await this.settings.get(member.guild.id)).autoRoles;
     if (!config.enabled || (member.user.bot && config.skipBots)) return;
-    if (config.waitForScreening && member.pending) return;
+    if (member.pending) {
+      await this.redis.client.set(
+        `guild:${member.guild.id}:autorole-pending:${member.id}`,
+        '1',
+        'EX',
+        30 * 24 * 60 * 60,
+      );
+      return;
+    }
     await this.enqueueAutoRole(member, member.joinedTimestamp ?? Date.now());
   }
 
-  private async handleAutoRoleMemberUpdate(oldMember: GuildMember | PartialGuildMember, member: GuildMember | PartialGuildMember): Promise<void> {
+  private async handleAutoRoleMemberUpdate(member: GuildMember | PartialGuildMember): Promise<void> {
     await this.cacheMemberRoleIds(member);
     const config = (await this.settings.get(member.guild.id)).autoRoles;
-    if (!config.enabled || (member.user.bot && config.skipBots) || !config.waitForScreening) return;
-    if (oldMember.pending === true && member.pending === false) {
+    if (!config.enabled || (member.user.bot && config.skipBots)) return;
+    if (member.pending === false && (await this.redis.client.exists(`guild:${member.guild.id}:autorole-pending:${member.id}`) || this.isRecentJoin(member))) {
+      await this.redis.client.del(`guild:${member.guild.id}:autorole-pending:${member.id}`);
       await this.enqueueAutoRole(member, member.joinedTimestamp ?? Date.now());
     }
   }
@@ -362,7 +358,7 @@ export class BotService implements OnApplicationBootstrap, OnApplicationShutdown
   private async enqueueAutoRole(member: GuildMember | PartialGuildMember, joinTimestamp: number): Promise<void> {
     const guildId = member.guild.id;
     const config = (await this.settings.get(guildId)).autoRoles;
-    if (!config.enabled || (member.user.bot && config.skipBots) || (config.waitForScreening && member.pending)) return;
+    if (!config.enabled || (member.user.bot && config.skipBots) || member.pending !== false) return;
     const roleId = config.roleIds[0];
     if (!roleId) return;
     const roles = await this.sync.getRoles(guildId);
@@ -374,30 +370,11 @@ export class BotService implements OnApplicationBootstrap, OnApplicationShutdown
     const dedupeKey = `guild:${guildId}:autorole:queued:${member.id}:${joinTimestamp}`;
     if (await this.redis.client.set(dedupeKey, '1', 'EX', 30 * 60, 'NX') !== 'OK') return;
 
+    let plannedDelaySeconds = 0;
     try {
-      const joinsLastMinute = await this.incrementAutoRoleJoinCounter(guildId);
-
-      const queueWaitingKey = `guild:${guildId}:queue-waiting`;
-      const cachedQueueWaiting = await this.redis.client.get(queueWaitingKey);
-      let queueWaiting = cachedQueueWaiting === null ? Number.NaN : Number(cachedQueueWaiting);
-      if (!Number.isFinite(queueWaiting)) {
-        const queueCounts = await this.queue.queue.getJobCounts('waiting');
-        queueWaiting = queueCounts.waiting ?? 0;
-        await this.redis.client.set(queueWaitingKey, String(queueWaiting), 'EX', 5);
-      }
-
-      const blockedUntil = Number(await this.redis.client.get('discord:blocked_until') ?? 0);
-      const discordBlockedSeconds = Math.max(0, Math.ceil((blockedUntil - Date.now()) / 1000));
-      const nextFreeSlotSeconds = config.delayMode === 'smart'
-        ? await this.reserveAutoRoleSlot(guildId)
-        : 0;
-      const delaySeconds = computeAutoRoleDelay({
-        mode: config.delayMode,
-        minDelaySeconds: config.minDelaySeconds,
-        fixedDelaySeconds: config.fixedDelaySeconds,
-        joinsLastMinute,
-        queueWaiting,
-        discordBlockedSeconds,
+      const nextFreeSlotSeconds = await this.reserveAutoRoleSlot(guildId);
+      plannedDelaySeconds = computeAutoRoleDelay({
+        delaySeconds: config.delaySeconds,
         nextFreeSlotSeconds,
       });
       await this.queue.enqueueAutoRole({
@@ -406,13 +383,34 @@ export class BotService implements OnApplicationBootstrap, OnApplicationShutdown
         userId: member.id,
         username: member.user.username,
         joinTimestamp,
-        pending: member.pending ?? false,
+        readyTimestamp: Date.now(),
+        pending: false,
         memberRoleIds: member instanceof GuildMember ? [...member.roles.cache.keys()] : [],
-      }, delaySeconds);
+      }, plannedDelaySeconds);
     } catch (error) {
       await this.redis.client.del(dedupeKey);
+      await this.recordEnqueueFailure(guildId, member.id, roleId, plannedDelaySeconds, error);
       throw error;
     }
+  }
+
+  private async recordEnqueueFailure(
+    guildId: string,
+    userId: string,
+    roleId: string,
+    delaySeconds: number,
+    error: unknown,
+  ): Promise<void> {
+    this.logger.error(`Auto-role enqueue failed guildId=${guildId} userId=${userId}: ${(error as Error).message}`);
+    await this.database.db.insert(autoRoleEvents).values({
+      guildId,
+      userId,
+      roleId,
+      outcome: 'enqueue_failed',
+      delaySeconds,
+    }).catch((insertError: unknown) => {
+      this.logger.error(`Could not record enqueue failure guildId=${guildId} userId=${userId}: ${(insertError as Error).message}`);
+    });
   }
 
   private async cacheMemberRoleIds(member: GuildMember | PartialGuildMember): Promise<void> {
@@ -429,13 +427,9 @@ export class BotService implements OnApplicationBootstrap, OnApplicationShutdown
     return `guild:${guildId}:member:${userId}:roles`;
   }
 
-  private async incrementAutoRoleJoinCounter(guildId: string): Promise<number> {
-    return Number(await this.redis.client.eval(
-      "local ttl=redis.call('TTL', KEYS[1]); local count=redis.call('INCR', KEYS[1]); if ttl < 0 then redis.call('EXPIRE', KEYS[1], ARGV[1]); end; return count",
-      1,
-      `guild:${guildId}:joins:60`,
-      '60',
-    ));
+  private isRecentJoin(member: GuildMember | PartialGuildMember): boolean {
+    const joinedAt = member.joinedTimestamp;
+    return joinedAt !== null && joinedAt !== undefined && joinedAt <= Date.now() && Date.now() - joinedAt <= 30 * 60 * 1000;
   }
 
   private async reserveAutoRoleSlot(guildId: string): Promise<number> {
@@ -449,7 +443,7 @@ export class BotService implements OnApplicationBootstrap, OnApplicationShutdown
       1,
       `guild:${guildId}:autorole-slot`,
       String(Date.now()),
-      '2000',
+      String(AUTO_ROLE_SLOT_SPACING_MS),
     );
     return Math.ceil(Number(result) / 1000);
   }

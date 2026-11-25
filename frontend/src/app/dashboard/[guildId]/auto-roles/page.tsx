@@ -325,7 +325,7 @@ export default function AutoRolesPage() {
           <Section title="Member filters" description="Choose which members can receive the role.">
             <div className="mt-4 space-y-3">
               <ToggleRow id="skip-bots" label="Skip bots" hint="Do not assign the role to bot accounts." checked={draft.skipBots} onChange={(skipBots) => patch({ skipBots })} />
-              <ToggleRow id="wait-screening" label="Wait for membership screening" hint="Assign after screening is complete." checked={draft.waitForScreening} onChange={(waitForScreening) => patch({ waitForScreening })} />
+              <p className="text-xs text-muted-foreground">Roles are only assigned after the member completes any required rules screening.</p>
             </div>
           </Section>
 
@@ -507,12 +507,13 @@ export default function AutoRolesPage() {
                 ) : (
                   <div className="overflow-x-auto">
                     <table className="w-full text-left text-sm">
-                      <thead><tr className="border-b border-border text-xs text-muted-foreground"><th className="py-2">User</th><th>Status</th><th className="text-right">Time</th></tr></thead>
+                      <thead><tr className="border-b border-border text-xs text-muted-foreground"><th className="py-2">User</th><th>Status</th><th className="text-right">Delay</th><th className="text-right">Time</th></tr></thead>
                       <tbody>
                         {activityData.activity.map((item) => (
                           <tr key={item.id} className="border-b border-border last:border-0">
                             <td className="py-2 font-mono text-xs">{item.userId}</td>
-                            <td className="py-2"><Badge tone={item.outcome === 'assigned' ? 'success' : item.outcome === 'failed' ? 'warning' : 'neutral'}>{item.outcome.replaceAll('_', ' ')}</Badge></td>
+                            <td className="py-2"><Badge tone={item.outcome === 'assigned' ? 'success' : item.outcome === 'failed' || item.outcome === 'enqueue_failed' ? 'warning' : 'neutral'}>{item.outcome.replaceAll('_', ' ')}</Badge></td>
+                            <td className="py-2 text-right text-xs text-muted-foreground">{item.delaySeconds === null ? '—' : `${item.delaySeconds}s`}</td>
                             <td className="py-2 text-right text-xs text-muted-foreground">{relativeTime(item.createdAt)}</td>
                           </tr>
                         ))}
