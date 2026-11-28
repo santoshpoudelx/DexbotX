@@ -56,6 +56,7 @@ The complete variable list and local defaults are in [`.env.example`](./.env.exa
 | `WEB_URL` | Public dashboard origin; used to validate requests and construct the Discord OAuth callback. |
 | `DATABASE_URL` | PostgreSQL connection URL. |
 | `REDIS_URL` | Redis connection URL. |
+| `UP_REDIS_URL` | Optional secondary Redis TCP URL for the shared guild-settings cache (`redis://` or `rediss://`); configure it on the API, bot, and worker services. |
 | `DISCORD_CLIENT_ID` | Discord application ID. |
 | `DISCORD_CLIENT_SECRET` | Discord OAuth client secret. |
 | `DISCORD_BOT_TOKEN` | Discord bot token. |
@@ -68,7 +69,7 @@ Useful optional settings include `ADMIN_USER_IDS` (admin access; empty disables 
 
 ## Deployment
 
-Deploy to any provider that supports long-running Node.js processes or containers. Run the API, bot, and worker as separate services so each can restart and scale independently. Configure them with the same `DATABASE_URL`, `REDIS_URL`, Discord credentials, and session key.
+Deploy to any provider that supports long-running Node.js processes or containers. Run the API, bot, and worker as separate services so each can restart and scale independently. Configure them with the same `DATABASE_URL`, `REDIS_URL`, `UP_REDIS_URL` when using the secondary cache, Discord credentials, and session key. `CACHE_REDIS_URL` remains supported as a legacy alias.
 
 Apply migrations once per release before starting updated processes:
 

@@ -64,7 +64,7 @@ Planned or not implemented in the current code:
 ### Database, cache, storage, and deployment
 - PostgreSQL is the source of truth for guilds/settings/channels/roles/templates/audit/moderation data.
 - Redis stores encrypted sessions, caches, rate-limit counters, pub/sub channels, feature flags/stat counters, and BullMQ jobs.
-- `CACHE_REDIS_URL` is used by the API for the secondary Redis health check; bot shards and the worker do not open unused secondary-cache connections.
+- `UP_REDIS_URL` optionally provides the secondary Redis TCP connection for the shared guild-settings L2 cache; configure it on the API, bot shards, and worker. Sessions, BullMQ, rate limits, pub/sub, and other shared coordination remain on `REDIS_URL`. `CACHE_REDIS_URL` remains a legacy alias.
 - Supabase Storage is optional for private custom card backgrounds.
 - Render is represented by `backend/render.yaml`; Dockerfiles exist for both packages.
 - Frontend production output is Next standalone; frontend is designed for Vercel and container hosts.
@@ -503,7 +503,8 @@ Command handling, rate limit (20 moderation actions per moderator per guild per 
 | `DATABASE_SSL` | Force PostgreSQL SSL | Optional; production default true | `true` |
 | `DATABASE_POOL_MAX` | PostgreSQL pool size | Optional; default 10 | `10` |
 | `REDIS_URL` | Redis connection URL | Required | `redis://host:6379` |
-| `CACHE_REDIS_URL` | Optional secondary Redis used for API dependency health checks | Optional; API only | `rediss://host:6379` |
+| `UP_REDIS_URL` | Optional secondary Redis TCP URL for the shared guild-settings cache | Optional; configure consistently on API, bot, and worker | `redis://host:6379` or `rediss://host:6379` |
+| `CACHE_REDIS_URL` | Legacy alias for `UP_REDIS_URL` | Optional; deprecated | `rediss://host:6379` |
 | `DISCORD_CLIENT_ID` | Discord application snowflake | Required | `17-20 digit snowflake` |
 | `DISCORD_CLIENT_SECRET` | Discord OAuth secret | Required | Discord OAuth secret |
 | `DISCORD_BOT_TOKEN` | Bot token | Required | Discord bot token |
@@ -783,7 +784,8 @@ Use a fresh disposable Redis container for each E2E run. If reusing a test-only 
 | 2026-11-25 | Handle and warn on economy component interactions that Discord reports as already acknowledged, editing the existing ephemeral reply | `backend/src/bot/economy-command.service.ts`; `backend/src/bot/economy-command.service.spec.ts`; this guide |
 | 2026-11-25 | Run backend/frontend CI and security scans on all branch pushes and pull requests while keeping Vercel Git deployments restricted to `main` | `.github/workflows/backend-ci.yml`; `.github/workflows/frontend-ci.yml`; `.github/workflows/security.yml`; this guide |
 | 2026-11-25 | Replace bounty member-list downloads with Discord user-select menus to avoid Gateway opcode 8 rate limits | `backend/src/bot/economy-command.service.ts`; `backend/src/bot/bot.service.ts`; `backend/src/bot/economy-command.service.spec.ts`; Discord store section |
+| 2026-11-26 | Added `UP_REDIS_URL` as the secondary TCP Redis connection for the shared guild-settings cache across API, bot, and worker; retained `CACHE_REDIS_URL` as a legacy alias | `backend/src/core/config.ts`; `backend/src/redis/redis.service.ts`; `backend/src/redis/settings-cache.service.ts`; `backend/src/bot/guild-sync.service.ts`; `backend/.env.example`; `backend/README.md`; environment and cache sections |
 
 ## 15. Last updated
 
-2026-11-25
+2026-11-26

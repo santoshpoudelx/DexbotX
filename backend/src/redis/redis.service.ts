@@ -17,24 +17,25 @@ export class RedisService implements OnApplicationShutdown {
   constructor(@Inject(APP_CONFIG) private readonly config: AppConfig) {
     this.role = process.env.DEXBOTX_PROCESS_ROLE ?? (process.env.SHARD_ID ? `shard${process.env.SHARD_ID}` : 'api');
     this.client = this.connect(`${this.role}:main`, { maxRetriesPerRequest: this.role === 'worker' ? null : 3 });
-    if (this.config.cacheRedisUrl && this.role === 'api') {
-      this.cacheClient = new Redis(this.config.cacheRedisUrl, {
-        connectionName: `${this.role}:cache`,
+    if (this.config.cacheRedisUrl) {
+      this.cacheClient = this.connect(`${this.role}:cache`, {
         maxRetriesPerRequest: 3,
-        retryStrategy: (times) => this.retryStrategy(times),
-      });
-      this.cacheClient.on('error', (err) => this.logger.error(`Redis error: ${err.message}`));
+      }, this.config.cacheRedisUrl);
     }
-    const expectedConnections = this.role === 'worker' ? 4 : 2;
+    const expectedConnections = (this.role === 'worker' ? 4 : 2) + (this.cacheClient ? 1 : 0);
     this.logger.log(`Redis connections expected: ${expectedConnections} (${this.role})`);
+  }
+
+  get cache(): Redis {
+    return this.cacheClient ?? this.client;
   }
 
   private retryStrategy(times: number): number {
     return Math.min(100 * 2 ** Math.min(times - 1, 7), 10_000);
   }
 
-  private connect(connectionName: string, options: RedisOptions): Redis {
-    const redis = new Redis(this.config.redisUrl, {
+  private connect(connectionName: string, options: RedisOptions, url = this.config.redisUrl): Redis {
+    const redis = new Redis(url, {
       ...options,
       connectionName,
       retryStrategy: (times) => this.retryStrategy(times),

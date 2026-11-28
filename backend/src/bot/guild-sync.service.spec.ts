@@ -80,7 +80,7 @@ function makeService(
     publish: jest.fn(async (..._args: unknown[]) => 1),
     incr: jest.fn(async (..._args: unknown[]) => 1),
   };
-  const redis = { client: redisClient } as unknown as RedisService;
+  const redis = { client: redisClient, cache: redisClient } as unknown as RedisService;
   const discord = {
     getGuildAsBot: jest.fn(async () => ({
       id: 'guild-123',

@@ -6,6 +6,10 @@ const PRODUCTION_BOT_PERMISSIONS = '1099780443326';
 const DEVELOPMENT_BOT_PERMISSIONS = '1099780443326';
 
 const boolish = z.enum(['true', 'false']).transform((v) => v === 'true');
+const redisConnectionUrl = z.string().url().refine((value) => {
+  const protocol = new URL(value).protocol;
+  return protocol === 'redis:' || protocol === 'rediss:';
+}, 'must use a redis:// or rediss:// URL');
 
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
@@ -28,7 +32,8 @@ const envSchema = z.object({
   DATABASE_POOL_MAX: z.coerce.number().int().min(1).max(50).default(10),
 
   REDIS_URL: z.string().min(1),
-  CACHE_REDIS_URL: z.string().url().optional().or(z.literal('')),
+  UP_REDIS_URL: redisConnectionUrl.optional().or(z.literal('')),
+  CACHE_REDIS_URL: redisConnectionUrl.optional().or(z.literal('')),
 
   DISCORD_CLIENT_ID: z.string().regex(/^\d{17,20}$/, 'must be a Discord snowflake'),
   DISCORD_CLIENT_SECRET: z.string().min(10),
@@ -192,7 +197,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     databaseSsl: e.DATABASE_SSL ?? isProd,
     databasePoolMax: e.DATABASE_POOL_MAX,
     redisUrl: e.REDIS_URL,
-    cacheRedisUrl: e.CACHE_REDIS_URL || undefined,
+    cacheRedisUrl: e.UP_REDIS_URL || e.CACHE_REDIS_URL || undefined,
     discordClientId: e.DISCORD_CLIENT_ID,
     discordClientSecret: e.DISCORD_CLIENT_SECRET,
     discordBotToken: e.DISCORD_BOT_TOKEN,

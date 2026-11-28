@@ -441,7 +441,7 @@ export class GuildSyncService {
       ),
       this.redis.client.set(guildChannelsCacheKey(guild.id), JSON.stringify(channels), 'EX', CHANNELS_TTL_SECONDS),
       this.redis.client.set(guildRolesCacheKey(guild.id), JSON.stringify(roles), 'EX', ROLES_TTL_SECONDS),
-      this.redis.client.set(guildSettingsCacheKey(guild.id), JSON.stringify(settings), 'EX', 60 * 60),
+      this.redis.cache.set(guildSettingsCacheKey(guild.id), JSON.stringify(settings), 'EX', 60 * 60),
       this.redis.client.publish(GUILD_CHANNELS_CHANGED_CHANNEL, guild.id),
       this.redis.client.publish(GUILD_ROLES_CHANGED_CHANNEL, guild.id),
       this.redis.client.publish(GUILD_SYNCED_CHANNEL, guild.id),

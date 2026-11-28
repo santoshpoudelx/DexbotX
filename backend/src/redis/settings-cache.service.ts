@@ -54,7 +54,7 @@ export class SettingsCache implements OnModuleInit {
 
     let value: GuildMessages | null = null;
     try {
-      const cached = await this.redis.client.get(guildSettingsCacheKey(guildId));
+      const cached = await this.redis.cache.get(guildSettingsCacheKey(guildId));
       if (cached) {
         value = this.parse(JSON.parse(cached));
         await this.stats.hit('settings');
@@ -66,7 +66,7 @@ export class SettingsCache implements OnModuleInit {
     if (!value) {
       await this.stats.miss('settings');
       value = await this.loadFromDb(guildId);
-      this.redis.client
+      this.redis.cache
         .set(guildSettingsCacheKey(guildId), JSON.stringify(value), 'EX', REDIS_TTL_SECONDS)
         .catch((err) => this.logger.warn(`Redis write failed for ${guildId}: ${err.message}`));
     }
@@ -77,7 +77,7 @@ export class SettingsCache implements OnModuleInit {
 
   async invalidate(guildId: string): Promise<void> {
     this.l1.delete(guildId);
-    await this.redis.client.del(guildSettingsCacheKey(guildId));
+    await this.redis.cache.del(guildSettingsCacheKey(guildId));
     await this.redis.client.publish(GUILD_SETTINGS_CHANGED_CHANNEL, guildId);
   }
 

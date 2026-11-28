@@ -27,6 +27,21 @@ describe('loadConfig', () => {
     expect(c.sessionKey).toHaveLength(32);
   });
 
+  it('uses UP_REDIS_URL for the secondary cache and retains the legacy alias', () => {
+    expect(loadConfig({
+      ...valid,
+      UP_REDIS_URL: 'rediss://cache.example.com:6380',
+    } as NodeJS.ProcessEnv).cacheRedisUrl).toBe('rediss://cache.example.com:6380');
+    expect(loadConfig({
+      ...valid,
+      CACHE_REDIS_URL: 'redis://legacy-cache.example.com:6379',
+    } as NodeJS.ProcessEnv).cacheRedisUrl).toBe('redis://legacy-cache.example.com:6379');
+    expect(() => loadConfig({
+      ...valid,
+      UP_REDIS_URL: 'tcp://cache.example.com:6379',
+    } as NodeJS.ProcessEnv)).toThrow(/UP_REDIS_URL/);
+  });
+
   it('requires a proxy secret only for the production API process', () => {
     expect(() => loadConfig({ ...valid, BACKEND_PROXY_SECRET: '', DEXBOTX_PROCESS_ROLE: 'api' } as NodeJS.ProcessEnv))
       .toThrow(/BACKEND_PROXY_SECRET/);
